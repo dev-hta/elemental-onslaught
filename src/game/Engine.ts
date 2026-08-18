@@ -238,6 +238,21 @@ export class Engine {
     }
   }
 
+  _findNearestEnemy() {
+    let nearest = null;
+    let minD = 999;
+    const pPos = this.character.position;
+    for (const e of this.enemyManager.enemies) {
+      if (!e.isAlive) continue;
+      const d = pPos.distanceTo(e.position);
+      if (d < minD) {
+        minD = d;
+        nearest = e;
+      }
+    }
+    return nearest;
+  }
+
   /* ---- public UI hooks ---- */
   armSlot(slot) {
     if (this.gameState !== 'playing') return;
@@ -249,6 +264,20 @@ export class Engine {
     }
     this.aim.setElement(el);
     this.aim.arm();
+
+    // Direct aim to nearest enemy if pointer is not actively positioned
+    const nearest = this._findNearestEnemy();
+    if (nearest && (!this.aim._hasPointer || Math.abs(this.aim._pointer.x) < 0.05 && Math.abs(this.aim._pointer.y) < 0.05)) {
+      const dir = nearest.position.clone().sub(this.character.position);
+      dir.y = 0;
+      if (dir.lengthSq() > 0.1) {
+        const d = dir.length();
+        this.aim.direction.copy(dir).normalize();
+        this.aim.yaw = Math.atan2(this.aim.direction.x, this.aim.direction.z);
+        this.aim.distance = Math.min(d, this.aim.config.range);
+      }
+    }
+
     this._emitState();
   }
 

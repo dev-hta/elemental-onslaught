@@ -284,18 +284,18 @@ export class AimController extends EventEmitter {
       if (this.raycaster.ray.intersectPlane(GROUND_PLANE, this._hit)) {
         this._flat.copy(this._hit).sub(this.origin);
         this._flat.y = 0;
-        if (this._flat.lengthSq() > 1e-6) {
-          const raw = this._flat.length();
+        const raw = this._flat.length();
+        if (raw > 0.1) {
           this.direction.copy(this._flat).multiplyScalar(1 / raw);
           this.yaw = Math.atan2(this.direction.x, this.direction.z);
-          this.valid = raw >= c.minRange;
-          this.distance = clamp(raw, Math.max(0.2, c.minRange), Math.max(0.4, c.range));
+          this.valid = true;
+          this.distance = clamp(raw, 1.5, Math.max(2.0, c.range));
           return;
         }
       }
     }
-    this.valid = false;
-    this.distance = clamp(this.distance, Math.max(0.2, c.minRange), Math.max(0.4, c.range));
+    this.valid = true;
+    this.distance = clamp(this.distance || 8, 1.5, Math.max(2.0, c.range));
   }
 
   update(dt) {

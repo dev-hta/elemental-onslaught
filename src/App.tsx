@@ -349,24 +349,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* Right: Floating Kill Feed Popups */}
-      <div className="pointer-events-none absolute right-3.5 sm:right-5 top-36 sm:top-40 z-20 flex flex-col items-end gap-1">
-        {hud.killFeed.slice(0, 3).map((kf) => {
-          const meta = (ELEMENT_META as any)[kf.element] || { color: '#ffffff', label: kf.element };
-          return (
-            <div
-              key={kf.id}
-              className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#080c16]/80 px-2.5 py-0.5 text-[9px] font-mono backdrop-blur-md"
-              style={{ borderColor: `${meta.color}40`, boxShadow: `0 0 10px -4px ${meta.color}` }}
-            >
-              <span className="text-xs" style={{ color: meta.color }}>{kf.glyph}</span>
-              <span className="text-white/80">{kf.name}</span>
-              <span className="font-bold" style={{ color: meta.color }}>+{kf.score}</span>
-            </div>
-          );
-        })}
-      </div>
-
       {/* Bottom-Left / Top-Left Vitals (HP & Shield) */}
       <div className="pointer-events-none absolute bottom-24 sm:bottom-22 left-3 sm:left-5 z-20 flex flex-col gap-1 rounded-xl border border-white/10 bg-[#080c16]/80 p-2.5 backdrop-blur-xl shadow-lg w-[160px] sm:w-[200px]">
         <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-wider">
