@@ -35,6 +35,9 @@ function ribbonStrip() {
 /** E — Storm Lance: lightning filaments drawn out behind the strike front. */
 export class ThunderAbility extends Ability {
   createShaders() {
+    this.orient = new Object3D();
+    this.group.add(this.orient);
+
     const geo = ribbonStrip();
     const fan = new Float32Array(MAX_STRANDS);
     const phase = new Float32Array(MAX_STRANDS);
@@ -119,7 +122,7 @@ export class ThunderAbility extends Ability {
     });
     this.decal = new Mesh(new PlaneGeometry(1,1), this.decalMat);
     this.decal.rotation.x = -Math.PI/2; this.decal.position.y = 0.03;
-    this.group.add(this.decal);
+    this.orient.add(this.decal);
     this._seed = 0;
   }
 

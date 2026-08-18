@@ -240,7 +240,6 @@ export class BeamAbility extends Ability {
     // intake motes spiralling into orb while charging
     if (charging) {
       this._moteAcc += 60 * dt * settings.global.particles;
-      conings.global.particles;
       const h = this._hand();
       while (this._moteAcc >= 1) {
         this._moteAcc--;

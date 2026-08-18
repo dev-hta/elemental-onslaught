@@ -194,11 +194,15 @@ export class EnemyManager {
       );
     }
 
-    // 5. Check Wave Completion
+    // 5. Seamless Wave Transition (No intrusive popups)
     if (this.waveSpawnQueue.length === 0 && this.enemies.filter((e) => e.isAlive).length === 0 && this.waveState !== 'cleared') {
       this.waveState = 'cleared';
-      soundSynth.playWaveClear();
       this.onWaveClear?.(this.currentWave);
+      setTimeout(() => {
+        if (this.waveState === 'cleared') {
+          this.startWave(this.currentWave + 1);
+        }
+      }, 1800);
     }
   }
 

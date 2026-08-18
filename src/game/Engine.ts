@@ -135,11 +135,8 @@ export class Engine {
       this._emitState();
     };
 
-    this.enemyManager.onWaveClear = (wave) => {
-      this.gameState = 'wave_clear';
-      // Pick 3 random power-up options
-      const shuffled = [...POWERUPS].sort(() => 0.5 - Math.random());
-      this.waveOptions = shuffled.slice(0, 3);
+    this.enemyManager.onWaveClear = (_wave) => {
+      this.gameState = 'playing';
       this._emitState();
     };
 

@@ -164,10 +164,9 @@ export class IceAbility extends Ability {
       const profile = Math.pow(u, s.heightCurve) * (1 - s.clumping * Math.min(1, latF * latF));
       const h = s.height * profile * hMul * Easing.outBack(growth) + 0.15;
       const latM = latF * (0.35 + 1.15 * u);
-      this.pointAt(u, _v).addScaledVector(this.side, latM);
 
-      _dummy.position.set(_v.x, 0, _v.z);
-      _dummy.rotation.set(lean, this.orient.rotation.y + yawJit, lean * 0.4);
+      _dummy.position.set(latM, 0, u * this.length);
+      _dummy.rotation.set(lean, yawJit, lean * 0.4);
       const sxz = 0.7 + 0.5 * (1 - growth);
       _dummy.scale.set(sxz, h, sxz);
       _dummy.updateMatrix();

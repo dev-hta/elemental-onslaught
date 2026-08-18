@@ -484,36 +484,6 @@ export default function App() {
         <ToolButton active={hud.help} onClick={() => e()?.toggleHelp()} label="H" title="Controls Guide (H)" />
       </div>
 
-      {/* Wave Clear / Power-Up Selection Modal */}
-      {hud.gameState === 'wave_clear' && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/75 backdrop-blur-md p-4">
-          <div className="flex flex-col items-center rounded-3xl border border-cyan-500/30 bg-[#080c16]/95 p-6 sm:p-8 max-w-lg w-full shadow-2xl text-center">
-            <div className="text-xl sm:text-2xl font-bold tracking-[0.25em] text-cyan-300 uppercase">
-              ✨ WAVE {hud.currentWave} CLEARED!
-            </div>
-            <p className="mt-1 text-xs text-white/50">
-              Select an elemental perk to empower your spells:
-            </p>
-
-            <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3.5 w-full">
-              {hud.waveOptions.map((opt) => (
-                <button
-                  key={opt.id}
-                  onClick={() => e()?.selectPowerup(opt.id)}
-                  className="group flex sm:flex-col items-center gap-3 sm:gap-0 rounded-2xl border border-white/10 bg-slate-900/50 p-3 sm:p-4 text-left sm:text-center transition-all hover:scale-102 sm:hover:scale-105 hover:border-cyan-400 hover:bg-cyan-950/20 shadow-md"
-                >
-                  <div className="text-2xl sm:text-3xl sm:mb-2 group-hover:scale-110 transition-transform">{opt.icon}</div>
-                  <div>
-                    <div className="font-bold text-xs text-cyan-200 group-hover:text-cyan-300">{opt.title}</div>
-                    <div className="mt-0.5 sm:mt-1 text-[10px] text-white/50 leading-tight">{opt.desc}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Game Over Defeat Modal */}
       {hud.gameState === 'game_over' && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
