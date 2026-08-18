@@ -9,7 +9,6 @@ import {
   RingGeometry,
   PlaneGeometry,
   ShaderMaterial,
-  MeshBasicMaterial,
   Vector3,
   Color,
   Object3D,
@@ -20,17 +19,18 @@ import {
 import { ParticleSystem } from '../ParticleSystem';
 import { NOISE_GLSL } from '../glsl';
 import { soundSynth } from '../audio/SoundSynth';
+import { settings } from '../settings';
 
 const _dummy = new Object3D();
 const _v = new Vector3();
 const _m = new Matrix4();
 
-const MAX_ICE_SHARDS = 120;
-const MAX_METEOR_CHUNKS = 80;
+const MAX_ICE_SHARDS = 140;
+const MAX_METEOR_CHUNKS = 90;
 
 /**
- * Manages the 5 distinct, bespoke destruction physics and visual simulations
- * when monsters are defeated by each elemental ability.
+ * Manages the 5 distinct, bespoke destruction physics and GLSL shader simulations
+ * when monsters are defeated by each elemental weapon.
  */
 export class DestructionEffects {
   constructor(scene, ctx) {
@@ -43,7 +43,7 @@ export class DestructionEffects {
     this.activeEffects = [];
 
     // --- 1. Ice Shard Instanced Mesh ---
-    const iceGeo = new ConeGeometry(0.12, 0.4, 5);
+    const iceGeo = new ConeGeometry(0.12, 0.42, 5);
     this.iceMat = new ShaderMaterial({
       transparent: true,
       depthWrite: true,
@@ -64,14 +64,17 @@ export class DestructionEffects {
           gl_Position = projectionMatrix * viewMatrix * wp;
         }
       `,
-      fragmentShader: `
+      fragmentShader: NOISE_GLSL + `
         varying vec3 vNormal; varying vec3 vWorld;
-        uniform vec3 uColorEdge, uColorMid, uColorDeep; uniform float uFade;
+        uniform vec3 uColorEdge, uColorMid, uColorDeep; uniform float uFade, uTime;
         void main(){
-          float th = pow(abs(dot(normalize(vNormal), vec3(0.0, 1.0, 0.4))), 0.8);
+          float th = pow(abs(dot(normalize(vNormal), vec3(0.0, 1.0, 0.4))), 0.85);
           vec3 col = mix(uColorDeep, uColorMid, th);
           col = mix(col, uColorEdge, pow(th, 2.5));
-          gl_FragColor = vec4(col * 1.4, (1.0 - uFade) * 0.95);
+          float frac = fbm3(vWorld * 5.0);
+          col *= 0.8 + 0.4 * frac;
+          float a = (1.0 - uFade * 0.95) * (0.6 + 0.4 * th);
+          gl_FragColor = vec4(col * 1.5, a);
         }
       `
     });
@@ -80,21 +83,21 @@ export class DestructionEffects {
     this.iceMesh.count = 0;
     this.group.add(this.iceMesh);
 
-    this.iceShards = [];
+    this.iceShardRecords = [];
     for (let i = 0; i < MAX_ICE_SHARDS; i++) {
-      this.iceShards.push({
+      this.iceShardRecords.push({
         active: false,
         pos: new Vector3(),
         vel: new Vector3(),
         rot: new Vector3(),
         rotVel: new Vector3(),
-        scale: 1,
-        life: 0,
+        scale: new Vector3(),
+        age: 0,
         maxLife: 1.2
       });
     }
 
-    // --- 2. Meteor Molten Chunk Instanced Mesh ---
+    // --- 2. Meteor Molten Rock Chunks ---
     const meteorGeo = new IcosahedronGeometry(0.18, 1);
     this.meteorMat = new ShaderMaterial({
       transparent: true,
@@ -103,22 +106,29 @@ export class DestructionEffects {
       uniforms: {
         uTime: { value: 0 },
         uFade: { value: 0 },
-        uLava: { value: new Color('#ff6622') },
-        uRock: { value: new Color('#2a1a18') }
+        uColorCore: { value: new Color('#ffd27f') },
+        uColorGlow: { value: new Color('#ff5a1e') },
+        uColorRock: { value: new Color('#2a1a18') }
       },
       vertexShader: `
-        varying vec3 vWorld;
+        varying vec3 vNormal; varying vec3 vWorld;
         void main(){
           vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
           vWorld = wp.xyz;
+          vNormal = normalize(mat3(modelMatrix * instanceMatrix) * normal);
           gl_Position = projectionMatrix * viewMatrix * wp;
         }
       `,
-      fragmentShader: `
-        varying vec3 vWorld; uniform vec3 uLava, uRock; uniform float uFade;
+      fragmentShader: NOISE_GLSL + `
+        varying vec3 vNormal; varying vec3 vWorld;
+        uniform vec3 uColorCore, uColorGlow, uColorRock; uniform float uFade, uTime;
         void main(){
-          vec3 col = mix(uLava * 1.6, uRock, 0.4);
-          gl_FragColor = vec4(col, 1.0 - uFade);
+          float n = fbm3(vWorld * 6.0);
+          float crack = smoothstep(0.4, 0.75, n);
+          vec3 col = mix(uColorRock, uColorGlow, crack);
+          col = mix(col, uColorCore, pow(crack, 3.0));
+          float a = (1.0 - uFade);
+          gl_FragColor = vec4(col * 1.8, a);
         }
       `
     });
@@ -127,544 +137,403 @@ export class DestructionEffects {
     this.meteorMesh.count = 0;
     this.group.add(this.meteorMesh);
 
-    this.meteorChunks = [];
+    this.meteorChunkRecords = [];
     for (let i = 0; i < MAX_METEOR_CHUNKS; i++) {
-      this.meteorChunks.push({
+      this.meteorChunkRecords.push({
         active: false,
         pos: new Vector3(),
         vel: new Vector3(),
         rot: new Vector3(),
         rotVel: new Vector3(),
-        scale: 1,
-        life: 0,
+        scale: new Vector3(),
+        age: 0,
         maxLife: 1.4
       });
     }
 
-    // --- 3. Particle Systems for Destructions ---
-    this.frostMist = new ParticleSystem(scene, {
+    // --- Particle Systems ---
+    this.iceMist = new ParticleSystem(scene, {
       capacity: 320,
-      additive: true,
-      gravity: 0.5,
-      drag: 1.0,
+      additive: false,
+      gravity: 0.3,
+      drag: 1.2,
       turb: 0.6,
-      size: 0.8,
-      opacity: 0.7,
-      colorA: '#ffffff',
-      colorB: '#8ee6ff',
-      colorC: '#2060aa'
+      size: 1.2,
+      opacity: 0.25,
+      colorA: '#cfeaff',
+      colorB: '#7fb8e6',
+      colorC: '#2a4a72'
     });
-
-    this.lightningSparks = new ParticleSystem(scene, {
+    this.iceGlitter = new ParticleSystem(scene, {
       capacity: 360,
       additive: true,
-      gravity: 3,
+      gravity: -1.5,
       drag: 0.4,
       turb: 0.8,
-      size: 0.15,
-      stretch: 0.6,
-      opacity: 0.95,
-      colorA: '#ffffff',
-      colorB: '#80c0ff',
-      colorC: '#2050e0'
-    });
-
-    this.fireDebris = new ParticleSystem(scene, {
-      capacity: 320,
-      additive: true,
-      gravity: 8,
-      drag: 0.6,
-      turb: 0.4,
-      size: 0.35,
+      size: 0.18,
       opacity: 0.9,
-      colorA: '#fff0a0',
-      colorB: '#ff6020',
-      colorC: '#601005'
+      colorA: '#ffffff',
+      colorB: '#9fe8ff',
+      colorC: '#3aa0ff'
     });
-
-    this.beamVapor = new ParticleSystem(scene, {
-      capacity: 320,
+    this.thunderSparks = new ParticleSystem(scene, {
+      capacity: 360,
       additive: true,
-      gravity: -6.0,
+      gravity: 3.5,
+      drag: 0.3,
+      turb: 1.2,
+      size: 0.25,
+      opacity: 1.0,
+      colorA: '#ffffff',
+      colorB: '#7fd0ff',
+      colorC: '#2e6bff'
+    });
+    this.meteorEmbers = new ParticleSystem(scene, {
+      capacity: 360,
+      additive: true,
+      gravity: 8.0,
+      drag: 0.4,
+      turb: 0.6,
+      size: 0.3,
+      opacity: 1.0,
+      colorA: '#ffeaa0',
+      colorB: '#ff7a2a',
+      colorC: '#991500'
+    });
+    this.meteorSmoke = new ParticleSystem(scene, {
+      capacity: 220,
+      additive: false,
+      gravity: -1.2,
       drag: 0.8,
       turb: 0.5,
-      size: 0.18,
-      stretch: 0.4,
-      opacity: 0.95,
-      colorA: '#ffffff',
-      colorB: '#80f0ff',
-      colorC: '#0080ff'
+      size: 1.6,
+      opacity: 0.35,
+      colorA: '#33201a',
+      colorB: '#1a100c',
+      colorC: '#080504'
     });
-
-    this.vortexSparks = new ParticleSystem(scene, {
+    this.laserMotes = new ParticleSystem(scene, {
       capacity: 320,
       additive: true,
-      gravity: -1.0,
-      drag: 0.3,
-      turb: 0.9,
-      size: 0.16,
-      opacity: 0.9,
+      gravity: -4.5,
+      drag: 0.2,
+      turb: 0.8,
+      size: 0.22,
+      opacity: 1.0,
       colorA: '#ffffff',
-      colorB: '#d080ff',
-      colorC: '#6010b0'
+      colorB: '#3fd0ff',
+      colorC: '#1e6bff'
+    });
+    this.snareTendrils = new ParticleSystem(scene, {
+      capacity: 320,
+      additive: true,
+      gravity: -0.5,
+      drag: 0.6,
+      turb: 1.8,
+      size: 0.3,
+      opacity: 0.9,
+      colorA: '#f0d8ff',
+      colorB: '#a05bff',
+      colorC: '#4a1580'
     });
   }
 
-  /** Trigger one of the 5 distinct elemental destructions on an enemy */
-  triggerDeath(enemy, element, onComplete) {
-    soundSynth.playEnemyDestroy(element);
-
+  /**
+   * Triggers the corresponding elemental destruction effect for an enemy death
+   */
+  triggerDeath(enemy, element) {
     const pos = enemy.position.clone();
-    const size = enemy.scale || 1.0;
+    const scale = enemy.scale || 1.0;
+    const time = this.ctx.time;
 
     switch (element) {
       case 'ice':
-        this._triggerIceShatter(pos, size, enemy);
+        this._destroyWithIce(enemy, pos, scale, time);
+        soundSynth.playIceShatter();
         break;
       case 'thunder':
-        this._triggerThunderElectrocution(pos, size, enemy);
+        this._destroyWithThunder(enemy, pos, scale, time);
+        soundSynth.playThunderShock();
         break;
       case 'meteor':
-        this._triggerMeteorObliteration(pos, size, enemy);
+        this._destroyWithMeteor(enemy, pos, scale, time);
+        soundSynth.playMeteorExplode();
         break;
       case 'beam':
-        this._triggerBeamVaporization(pos, size, enemy);
+        this._destroyWithBeam(enemy, pos, scale, time);
+        soundSynth.playBeamDissolve();
         break;
       case 'snare':
-        this._triggerSnareImplosion(pos, size, enemy);
+        this._destroyWithSnare(enemy, pos, scale, time);
+        soundSynth.playSnareSingularity();
         break;
       default:
-        this._triggerGenericDeath(pos, size);
+        this._destroyWithIce(enemy, pos, scale, time);
+        soundSynth.playIceShatter();
         break;
     }
-
-    if (onComplete) onComplete();
   }
 
-  // 1. Ice: Flash freeze -> shatter into 20+ physics tumbling ice shards
-  _triggerIceShatter(pos, size, enemy) {
-    const shardCount = Math.floor(18 + size * 10);
-    const now = this.ctx.time || 0;
-
-    // Burst mist & frost particles
-    this.frostMist.burst(30, () => ({
-      pos: pos.clone().add(new Vector3((Math.random() - 0.5) * size, Math.random() * size * 1.2, (Math.random() - 0.5) * size)),
-      vel: new Vector3((Math.random() - 0.5) * 3, 1 + Math.random() * 3, (Math.random() - 0.5) * 3),
-      life: 0.8 + Math.random() * 0.5,
-      size: 0.3 + Math.random() * 0.4,
-      seed: Math.random() * 100
-    }), now);
-
-    // Spawn tumbling ice shards
+  // 1. ICE DESTRUCTION: Flash-freeze & shatter into physics-tumbled ice shards
+  _destroyWithIce(enemy, pos, scale, time) {
+    const shardCount = Math.round(24 * scale);
     let spawned = 0;
-    for (const shard of this.iceShards) {
-      if (!shard.active) {
-        shard.active = true;
-        shard.pos.copy(pos).add(new Vector3((Math.random() - 0.5) * size * 0.8, Math.random() * size * 1.2, (Math.random() - 0.5) * size * 0.8));
-        const angle = Math.random() * Math.PI * 2;
-        const speed = 3 + Math.random() * 6;
-        shard.vel.set(Math.cos(angle) * speed, 2 + Math.random() * 6, Math.sin(angle) * speed);
-        shard.rot.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-        shard.rotVel.set((Math.random() - 0.5) * 12, (Math.random() - 0.5) * 12, (Math.random() - 0.5) * 12);
-        shard.scale = 0.5 + Math.random() * 0.8;
-        shard.life = 0;
-        shard.maxLife = 0.9 + Math.random() * 0.6;
-        spawned++;
-        if (spawned >= shardCount) break;
-      }
+
+    for (const rec of this.iceShardRecords) {
+      if (rec.active) continue;
+
+      rec.active = true;
+      rec.age = 0;
+      rec.maxLife = 1.0 + Math.random() * 0.6;
+      rec.pos.set(
+        pos.x + (Math.random() - 0.5) * 0.6 * scale,
+        pos.y + 0.2 + Math.random() * 0.8 * scale,
+        pos.z + (Math.random() - 0.5) * 0.6 * scale
+      );
+      const speed = 3.5 + Math.random() * 5.0;
+      const angle = Math.random() * Math.PI * 2;
+      rec.vel.set(
+        Math.cos(angle) * speed,
+        2.5 + Math.random() * 4.5,
+        Math.sin(angle) * speed
+      );
+      rec.rot.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      rec.rotVel.set(
+        (Math.random() - 0.5) * 12,
+        (Math.random() - 0.5) * 12,
+        (Math.random() - 0.5) * 12
+      );
+      const sc = (0.7 + Math.random() * 0.6) * scale;
+      rec.scale.set(sc, sc * (1 + Math.random()), sc);
+
+      spawned++;
+      if (spawned >= shardCount) break;
     }
 
-    // Flash a frost point light
-    const light = this.ctx.lights?.acquire();
-    if (light) {
-      this.activeEffects.push({
-        type: 'lightFade',
-        light,
-        color: new Color('#a0ecff'),
-        pos: pos.clone().setY(pos.y + 0.8),
-        intensity: 8,
-        radius: 10,
-        age: 0,
-        maxAge: 0.45
-      });
-    }
-  }
-
-  // 2. Thunder: High voltage spasm & blinding electric skeleton disintegration
-  _triggerThunderElectrocution(pos, size, enemy) {
-    const now = this.ctx.time || 0;
-
-    // Violent spark cascade
-    this.lightningSparks.burst(50, () => ({
-      pos: pos.clone().add(new Vector3((Math.random() - 0.5) * size * 0.8, Math.random() * size * 1.5, (Math.random() - 0.5) * size * 0.8)),
-      vel: new Vector3((Math.random() - 0.5) * 8, 2 + Math.random() * 6, (Math.random() - 0.5) * 8),
-      life: 0.4 + Math.random() * 0.4,
-      size: 0.08 + Math.random() * 0.14,
+    // Mist burst & Diamond Glitter Plume
+    this.iceMist.burst(25, () => ({
+      pos: pos.clone().setY(pos.y + 0.4),
+      vel: new Vector3((Math.random() - 0.5) * 2, 0.5 + Math.random() * 0.8, (Math.random() - 0.5) * 2),
+      life: 0.9 + Math.random() * 0.6,
+      size: 0.4 + Math.random() * 0.4,
       seed: Math.random() * 100
-    }), now);
+    }), time);
 
-    // Expanding lightning ground shock ring
-    const ringGeo = new RingGeometry(0.2, 0.35, 20);
-    const ringMat = new ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: DoubleSide,
-      blending: AdditiveBlending,
-      uniforms: { uFade: { value: 0 }, uColor: { value: new Color('#7fd0ff') } },
-      vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-      fragmentShader: `varying vec2 vUv; uniform vec3 uColor; uniform float uFade; void main(){ gl_FragColor = vec4(uColor * 2.0, (1.0 - uFade) * 0.9); }`
-    });
-    const ringMesh = new Mesh(ringGeo, ringMat);
-    ringMesh.rotation.x = -Math.PI / 2;
-    ringMesh.position.copy(pos).setY(0.04);
-    this.group.add(ringMesh);
-
-    this.activeEffects.push({
-      type: 'shockRing',
-      mesh: ringMesh,
-      mat: ringMat,
-      geo: ringGeo,
-      scale: 1,
-      maxScale: 3.5 * size,
-      age: 0,
-      maxAge: 0.35
-    });
-
-    // High intensity flash light
-    const light = this.ctx.lights?.acquire();
-    if (light) {
-      this.activeEffects.push({
-        type: 'lightFade',
-        light,
-        color: new Color('#80d0ff'),
-        pos: pos.clone().setY(pos.y + 1),
-        intensity: 12,
-        radius: 14,
-        age: 0,
-        maxAge: 0.3
-      });
-    }
-  }
-
-  // 3. Meteor: Fiery detonation, flaming chunks flying outward, ground scorch
-  _triggerMeteorObliteration(pos, size, enemy) {
-    const chunkCount = Math.floor(14 + size * 8);
-    const now = this.ctx.time || 0;
-
-    // Fire debris and smoke explosion
-    this.fireDebris.burst(40, () => ({
-      pos: pos.clone().add(new Vector3((Math.random() - 0.5) * size, Math.random() * size, (Math.random() - 0.5) * size)),
-      vel: new Vector3((Math.random() - 0.5) * 10, 3 + Math.random() * 8, (Math.random() - 0.5) * 10),
-      life: 0.6 + Math.random() * 0.7,
-      size: 0.2 + Math.random() * 0.35,
+    this.iceGlitter.burst(35, () => ({
+      pos: pos.clone().setY(pos.y + 0.4),
+      vel: new Vector3((Math.random() - 0.5) * 4, 2.0 + Math.random() * 3.5, (Math.random() - 0.5) * 4),
+      life: 0.8 + Math.random() * 0.6,
+      size: 0.08 + Math.random() * 0.1,
       seed: Math.random() * 100
-    }), now);
-
-    // Spawn fiery molten rock chunks
-    let spawned = 0;
-    for (const chunk of this.meteorChunks) {
-      if (!chunk.active) {
-        chunk.active = true;
-        chunk.pos.copy(pos).add(new Vector3((Math.random() - 0.5) * size * 0.5, Math.random() * size * 0.8, (Math.random() - 0.5) * size * 0.5));
-        const angle = Math.random() * Math.PI * 2;
-        const speed = 4 + Math.random() * 7;
-        chunk.vel.set(Math.cos(angle) * speed, 3 + Math.random() * 7, Math.sin(angle) * speed);
-        chunk.rot.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-        chunk.rotVel.set((Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10);
-        chunk.scale = 0.6 + Math.random() * 0.8;
-        chunk.life = 0;
-        chunk.maxLife = 1.0 + Math.random() * 0.5;
-        spawned++;
-        if (spawned >= chunkCount) break;
-      }
-    }
-
-    // Heavy fiery flash light
-    const light = this.ctx.lights?.acquire();
-    if (light) {
-      this.activeEffects.push({
-        type: 'lightFade',
-        light,
-        color: new Color('#ff7020'),
-        pos: pos.clone().setY(pos.y + 0.8),
-        intensity: 14,
-        radius: 16,
-        age: 0,
-        maxAge: 0.5
-      });
-    }
+    }), time);
   }
 
-  // 4. Nova Beam: Laser vaporization, upward streaming cyan laser motes and light columns
-  _triggerBeamVaporization(pos, size, enemy) {
-    const now = this.ctx.time || 0;
-
-    // Upward beam vapor stream
-    this.beamVapor.burst(50, () => ({
-      pos: pos.clone().add(new Vector3((Math.random() - 0.5) * size * 0.8, Math.random() * size * 1.4, (Math.random() - 0.5) * size * 0.8)),
-      vel: new Vector3((Math.random() - 0.5) * 1.5, 4 + Math.random() * 6, (Math.random() - 0.5) * 1.5),
-      life: 0.5 + Math.random() * 0.4,
-      size: 0.12 + Math.random() * 0.18,
-      seed: Math.random() * 100
-    }), now);
-
-    // Laser expanding shock rings
-    const ringGeo = new RingGeometry(0.1, 0.4, 24);
-    const ringMat = new ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: DoubleSide,
-      blending: AdditiveBlending,
-      uniforms: { uFade: { value: 0 }, uColor: { value: new Color('#3fd0ff') } },
-      vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-      fragmentShader: `varying vec2 vUv; uniform vec3 uColor; uniform float uFade; void main(){ gl_FragColor = vec4(uColor * 2.2, (1.0 - uFade)); }`
-    });
-    const ringMesh = new Mesh(ringGeo, ringMat);
-    ringMesh.rotation.x = -Math.PI / 2;
-    ringMesh.position.copy(pos).setY(0.5);
-    this.group.add(ringMesh);
-
-    this.activeEffects.push({
-      type: 'shockRing',
-      mesh: ringMesh,
-      mat: ringMat,
-      geo: ringGeo,
-      scale: 1,
-      maxScale: 2.8 * size,
-      age: 0,
-      maxAge: 0.4
-    });
-
-    const light = this.ctx.lights?.acquire();
-    if (light) {
-      this.activeEffects.push({
-        type: 'lightFade',
-        light,
-        color: new Color('#80f0ff'),
-        pos: pos.clone().setY(pos.y + 1),
-        intensity: 12,
-        radius: 14,
-        age: 0,
-        maxAge: 0.4
-      });
-    }
-  }
-
-  // 5. Voltaic Snare: Gravitational vortex lift, twisting tendrils, imploding singularity
-  _triggerSnareImplosion(pos, size, enemy) {
-    const now = this.ctx.time || 0;
-
-    // Singularity intake vortex particles
-    this.vortexSparks.burst(45, () => {
+  // 2. THUNDER DESTRUCTION: High-voltage spasms & cascading blue electric spark motes
+  _destroyWithThunder(enemy, pos, scale, time) {
+    this.thunderSparks.burst(65, () => {
       const a = Math.random() * Math.PI * 2;
-      const r = (1.5 + Math.random() * 1.5) * size;
-      const spawnPos = pos.clone().add(new Vector3(Math.cos(a) * r, 0.2 + Math.random() * 1.5, Math.sin(a) * r));
-      const target = pos.clone().setY(pos.y + 0.8);
-      const vel = target.sub(spawnPos).multiplyScalar(2.5);
+      const sp = 4.0 + Math.random() * 6.5;
       return {
-        pos: spawnPos,
-        vel,
-        life: 0.4 + Math.random() * 0.3,
-        size: 0.12 + Math.random() * 0.15,
+        pos: pos.clone().setY(pos.y + 0.3 + Math.random() * 0.8 * scale),
+        vel: new Vector3(Math.cos(a) * sp, 1.5 + Math.random() * 5.0, Math.sin(a) * sp),
+        life: 0.5 + Math.random() * 0.5,
+        size: 0.12 + Math.random() * 0.18,
         seed: Math.random() * 100
       };
-    }, now);
-
-    // Expanding then snapping violet implosion core
-    const coreGeo = new IcosahedronGeometry(0.4 * size, 2);
-    const coreMat = new ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: AdditiveBlending,
-      uniforms: { uFade: { value: 0 }, uColor: { value: new Color('#b050ff') } },
-      vertexShader: `varying vec3 vNormal; void main(){ vNormal = normal; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-      fragmentShader: `varying vec3 vNormal; uniform vec3 uColor; uniform float uFade; void main(){ float rim = pow(1.0 - abs(dot(vNormal, vec3(0,0,1))), 2.0); gl_FragColor = vec4(uColor * (1.0 + rim * 2.0), (1.0 - uFade) * 0.9); }`
-    });
-    const coreMesh = new Mesh(coreGeo, coreMat);
-    coreMesh.position.copy(pos).setY(pos.y + 0.8);
-    this.group.add(coreMesh);
-
-    this.activeEffects.push({
-      type: 'implosionCore',
-      mesh: coreMesh,
-      mat: coreMat,
-      geo: coreGeo,
-      scale: 1,
-      age: 0,
-      maxAge: 0.45
-    });
-
-    const light = this.ctx.lights?.acquire();
-    if (light) {
-      this.activeEffects.push({
-        type: 'lightFade',
-        light,
-        color: new Color('#c070ff'),
-        pos: pos.clone().setY(pos.y + 0.8),
-        intensity: 10,
-        radius: 12,
-        age: 0,
-        maxAge: 0.45
-      });
-    }
+    }, time);
   }
 
-  _triggerGenericDeath(pos, size) {
-    const now = this.ctx.time || 0;
-    this.frostMist.burst(20, () => ({
-      pos: pos.clone().add(new Vector3((Math.random() - 0.5) * size, Math.random() * size, (Math.random() - 0.5) * size)),
-      vel: new Vector3((Math.random() - 0.5) * 3, 2 + Math.random() * 3, (Math.random() - 0.5) * 3),
-      life: 0.5,
-      size: 0.2,
+  // 3. METEOR DESTRUCTION: Molten magma detonation with flying burning rock chunks & smoke
+  _destroyWithMeteor(enemy, pos, scale, time) {
+    const chunkCount = Math.round(18 * scale);
+    let spawned = 0;
+
+    for (const rec of this.meteorChunkRecords) {
+      if (rec.active) continue;
+
+      rec.active = true;
+      rec.age = 0;
+      rec.maxLife = 1.2 + Math.random() * 0.5;
+      rec.pos.set(
+        pos.x + (Math.random() - 0.5) * 0.5 * scale,
+        pos.y + 0.3 + Math.random() * 0.6 * scale,
+        pos.z + (Math.random() - 0.5) * 0.5 * scale
+      );
+      const speed = 4.5 + Math.random() * 7.0;
+      const angle = Math.random() * Math.PI * 2;
+      rec.vel.set(
+        Math.cos(angle) * speed,
+        3.5 + Math.random() * 6.0,
+        Math.sin(angle) * speed
+      );
+      rec.rot.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      rec.rotVel.set(
+        (Math.random() - 0.5) * 10,
+        (Math.random() - 0.5) * 10,
+        (Math.random() - 0.5) * 10
+      );
+      const sc = (0.7 + Math.random() * 0.5) * scale;
+      rec.scale.set(sc, sc, sc);
+
+      spawned++;
+      if (spawned >= chunkCount) break;
+    }
+
+    this.meteorEmbers.burst(55, () => ({
+      pos: pos.clone().setY(pos.y + 0.3),
+      vel: new Vector3((Math.random() - 0.5) * 6, 2.5 + Math.random() * 5.5, (Math.random() - 0.5) * 6),
+      life: 0.8 + Math.random() * 0.7,
+      size: 0.15 + Math.random() * 0.2,
       seed: Math.random() * 100
-    }), now);
+    }), time);
+
+    this.meteorSmoke.burst(25, () => ({
+      pos: pos.clone().setY(pos.y + 0.3),
+      vel: new Vector3((Math.random() - 0.5) * 1.5, 1.2 + Math.random() * 1.5, (Math.random() - 0.5) * 1.5),
+      life: 1.2 + Math.random() * 0.8,
+      size: 0.5 + Math.random() * 0.5,
+      seed: Math.random() * 100
+    }), time);
+  }
+
+  // 4. BEAM DESTRUCTION: Piercing laser vaporization into streaming cyan motes
+  _destroyWithBeam(enemy, pos, scale, time) {
+    this.laserMotes.burst(60, () => ({
+      pos: pos.clone().setY(pos.y + Math.random() * 1.2 * scale),
+      vel: new Vector3((Math.random() - 0.5) * 1.2, 4.0 + Math.random() * 5.0, (Math.random() - 0.5) * 1.2),
+      life: 0.7 + Math.random() * 0.6,
+      size: 0.1 + Math.random() * 0.15,
+      seed: Math.random() * 100
+    }), time);
+  }
+
+  // 5. SNARE DESTRUCTION: Gravitational suction vortex into point singularity
+  _destroyWithSnare(enemy, pos, scale, time) {
+    this.snareTendrils.burst(50, () => {
+      const a = Math.random() * Math.PI * 2;
+      const r = 1.2 + Math.random() * 1.5;
+      return {
+        pos: new Vector3(pos.x + Math.cos(a) * r, pos.y + Math.random() * 1.5 * scale, pos.z + Math.sin(a) * r),
+        vel: new Vector3(-Math.cos(a) * 3.5, 0.5 + Math.random() * 2.0, -Math.sin(a) * 3.5),
+        life: 0.6 + Math.random() * 0.5,
+        size: 0.15 + Math.random() * 0.2,
+        seed: Math.random() * 100
+      };
+    }, time);
   }
 
   update(dt, time) {
-    // 1. Update Ice Shards Simulation
+    // 1. Update Ice Shards with Floor Bounces & Friction
     let activeIce = 0;
     for (let i = 0; i < MAX_ICE_SHARDS; i++) {
-      const s = this.iceShards[i];
-      if (!s.active) {
-        _dummy.position.set(0, -999, 0);
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.iceMesh.setMatrixAt(i, _dummy.matrix);
+      const rec = this.iceShardRecords[i];
+      if (!rec.active) {
+        this.iceMesh.setMatrixAt(i, _m.identity().scale(_v.set(0, 0, 0)));
         continue;
       }
 
-      s.life += dt;
-      if (s.life >= s.maxLife) {
-        s.active = false;
+      rec.age += dt;
+      if (rec.age >= rec.maxLife) {
+        rec.active = false;
+        this.iceMesh.setMatrixAt(i, _m.identity().scale(_v.set(0, 0, 0)));
         continue;
       }
 
-      // Physics: gravity + ground bounce
-      s.vel.y -= 14 * dt;
-      s.pos.addScaledVector(s.vel, dt);
-      if (s.pos.y < 0.1) {
-        s.pos.y = 0.1;
-        s.vel.y = -s.vel.y * 0.45;
-        s.vel.x *= 0.7;
-        s.vel.z *= 0.7;
+      activeIce++;
+      rec.vel.y -= 13.0 * dt; // Gravity
+      rec.pos.addScaledVector(rec.vel, dt);
+
+      // Floor bounce & friction
+      if (rec.pos.y < 0.08) {
+        rec.pos.y = 0.08;
+        rec.vel.y = -rec.vel.y * 0.42; // restitution
+        rec.vel.x *= 0.85;
+        rec.vel.z *= 0.85;
       }
-      s.rot.addScaledVector(s.rotVel, dt);
 
-      const fade = Math.max(0, s.life / s.maxLife);
-      const sc = s.scale * (1 - fade * 0.6);
+      rec.rot.x += rec.rotVel.x * dt;
+      rec.rot.y += rec.rotVel.y * dt;
+      rec.rot.z += rec.rotVel.z * dt;
 
-      _dummy.position.copy(s.pos);
-      _dummy.rotation.set(s.rot.x, s.rot.y, s.rot.z);
-      _dummy.scale.set(sc, sc, sc);
+      const fade = rec.age / rec.maxLife;
+      const s = (1 - fade * fade) * 0.95;
+
+      _dummy.position.copy(rec.pos);
+      _dummy.rotation.set(rec.rot.x, rec.rot.y, rec.rot.z);
+      _dummy.scale.set(rec.scale.x * s, rec.scale.y * s, rec.scale.z * s);
       _dummy.updateMatrix();
       this.iceMesh.setMatrixAt(i, _dummy.matrix);
-      activeIce++;
     }
-    this.iceMesh.count = MAX_ICE_SHARDS;
+    this.iceMesh.count = activeIce;
     this.iceMesh.instanceMatrix.needsUpdate = true;
     this.iceMat.uniforms.uTime.value = time;
 
-    // 2. Update Meteor Chunks Simulation
+    // 2. Update Meteor Molten Rock Chunks
     let activeMeteor = 0;
     for (let i = 0; i < MAX_METEOR_CHUNKS; i++) {
-      const c = this.meteorChunks[i];
-      if (!c.active) {
-        _dummy.position.set(0, -999, 0);
-        _dummy.scale.set(0, 0, 0);
-        _dummy.updateMatrix();
-        this.meteorMesh.setMatrixAt(i, _dummy.matrix);
+      const rec = this.meteorChunkRecords[i];
+      if (!rec.active) {
+        this.meteorMesh.setMatrixAt(i, _m.identity().scale(_v.set(0, 0, 0)));
         continue;
       }
 
-      c.life += dt;
-      if (c.life >= c.maxLife) {
-        c.active = false;
+      rec.age += dt;
+      if (rec.age >= rec.maxLife) {
+        rec.active = false;
+        this.meteorMesh.setMatrixAt(i, _m.identity().scale(_v.set(0, 0, 0)));
         continue;
       }
 
-      c.vel.y -= 16 * dt;
-      c.pos.addScaledVector(c.vel, dt);
-      if (c.pos.y < 0.1) {
-        c.pos.y = 0.1;
-        c.vel.y = -c.vel.y * 0.35;
-        c.vel.x *= 0.65;
-        c.vel.z *= 0.65;
+      activeMeteor++;
+      rec.vel.y -= 15.0 * dt;
+      rec.pos.addScaledVector(rec.vel, dt);
+
+      if (rec.pos.y < 0.09) {
+        rec.pos.y = 0.09;
+        rec.vel.y = -rec.vel.y * 0.35;
+        rec.vel.x *= 0.82;
+        rec.vel.z *= 0.82;
       }
-      c.rot.addScaledVector(c.rotVel, dt);
 
-      const fade = Math.max(0, c.life / c.maxLife);
-      const sc = c.scale * (1 - fade * 0.5);
+      rec.rot.x += rec.rotVel.x * dt;
+      rec.rot.y += rec.rotVel.y * dt;
+      rec.rot.z += rec.rotVel.z * dt;
 
-      _dummy.position.copy(c.pos);
-      _dummy.rotation.set(c.rot.x, c.rot.y, c.rot.z);
-      _dummy.scale.set(sc, sc, sc);
+      const fade = rec.age / rec.maxLife;
+      const s = (1 - fade * fade) * 0.9;
+
+      _dummy.position.copy(rec.pos);
+      _dummy.rotation.set(rec.rot.x, rec.rot.y, rec.rot.z);
+      _dummy.scale.set(rec.scale.x * s, rec.scale.y * s, rec.scale.z * s);
       _dummy.updateMatrix();
       this.meteorMesh.setMatrixAt(i, _dummy.matrix);
-      activeMeteor++;
     }
-    this.meteorMesh.count = MAX_METEOR_CHUNKS;
+    this.meteorMesh.count = activeMeteor;
     this.meteorMesh.instanceMatrix.needsUpdate = true;
     this.meteorMat.uniforms.uTime.value = time;
 
     // 3. Update Particle Systems
-    this.frostMist.update(dt, time);
-    this.lightningSparks.update(dt, time);
-    this.fireDebris.update(dt, time);
-    this.beamVapor.update(dt, time);
-    this.vortexSparks.update(dt, time);
-
-    // 4. Update Active Mesh / Light Effects
-    for (let i = this.activeEffects.length - 1; i >= 0; i--) {
-      const eff = this.activeEffects[i];
-      eff.age += dt;
-      const progress = eff.age / eff.maxAge;
-
-      if (progress >= 1) {
-        if (eff.type === 'lightFade' && eff.light) {
-          this.ctx.lights?.release(eff.light);
-        } else if (eff.mesh) {
-          this.group.remove(eff.mesh);
-          eff.geo?.dispose();
-          eff.mat?.dispose();
-        }
-        this.activeEffects.splice(i, 1);
-        continue;
-      }
-
-      if (eff.type === 'lightFade') {
-        const falloff = 1 - progress;
-        this.ctx.lights?.set(eff.light, eff.pos, eff.color, eff.intensity * falloff, eff.radius * falloff, dt);
-      } else if (eff.type === 'shockRing') {
-        const curScale = 1 + (eff.maxScale - 1) * progress;
-        eff.mesh.scale.set(curScale, curScale, 1);
-        eff.mat.uniforms.uFade.value = progress;
-      } else if (eff.type === 'implosionCore') {
-        // Expand first then snap shrink
-        const s = progress < 0.3 ? 1 + progress * 2.0 : Math.max(0.01, (1 - (progress - 0.3) / 0.7));
-        eff.mesh.scale.set(s, s, s);
-        eff.mesh.rotation.y += dt * 8;
-        eff.mat.uniforms.uFade.value = progress;
-      }
-    }
+    this.iceMist.update(dt, time);
+    this.iceGlitter.update(dt, time);
+    this.thunderSparks.update(dt, time);
+    this.meteorEmbers.update(dt, time);
+    this.meteorSmoke.update(dt, time);
+    this.laserMotes.update(dt, time);
+    this.snareTendrils.update(dt, time);
   }
 
   clear() {
-    for (const s of this.iceShards) s.active = false;
-    for (const c of this.meteorChunks) c.active = false;
-    for (const eff of this.activeEffects) {
-      if (eff.type === 'lightFade' && eff.light) this.ctx.lights?.release(eff.light);
-      else if (eff.mesh) {
-        this.group.remove(eff.mesh);
-        eff.geo?.dispose();
-        eff.mat?.dispose();
-      }
-    }
-    this.activeEffects.length = 0;
-    this.frostMist.reset();
-    this.lightningSparks.reset();
-    this.fireDebris.reset();
-    this.beamVapor.reset();
-    this.vortexSparks.reset();
+    for (const r of this.iceShardRecords) r.active = false;
+    for (const r of this.meteorChunkRecords) r.active = false;
+    this.iceMesh.count = 0;
+    this.meteorMesh.count = 0;
+    this.iceMist.reset();
+    this.iceGlitter.reset();
+    this.thunderSparks.reset();
+    this.meteorEmbers.reset();
+    this.meteorSmoke.reset();
+    this.laserMotes.reset();
+    this.snareTendrils.reset();
   }
 
   dispose() {
@@ -674,10 +543,12 @@ export class DestructionEffects {
     this.iceMat.dispose();
     this.meteorMesh.geometry.dispose();
     this.meteorMat.dispose();
-    this.frostMist.dispose();
-    this.lightningSparks.dispose();
-    this.fireDebris.dispose();
-    this.beamVapor.dispose();
-    this.vortexSparks.dispose();
+    this.iceMist.dispose();
+    this.iceGlitter.dispose();
+    this.thunderSparks.dispose();
+    this.meteorEmbers.dispose();
+    this.meteorSmoke.dispose();
+    this.laserMotes.dispose();
+    this.snareTendrils.dispose();
   }
 }
