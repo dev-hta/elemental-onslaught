@@ -24,9 +24,9 @@ export const EnemyState = Object.freeze({
 const _tempVec = new Vector3();
 
 /**
- * High-polish Base Enemy class with procedural GLSL shader materials,
- * holographic in-world ground status rings (no ugly 2D floating billboards),
- * dynamic elemental hit flashes, and state-machine locomotion.
+ * High-polish Base Enemy class with procedural GLSL shaders,
+ * in-world holographic status rings, physical hit reactions,
+ * and bespoke 5-element death transformation sequences.
  */
 export class Enemy {
   constructor(scene, opts = {}) {
@@ -57,10 +57,16 @@ export class Enemy {
     };
 
     this.state = EnemyState.SPAWN;
-    this.spawnTime = 0.6;
+    this.spawnTime = 0.5;
     this.spawnTimer = 0;
     this.staggerTimer = 0;
     this.attackWindup = 0;
+
+    // Death sequence properties
+    this.deathElement = 'ice';
+    this.deathTimer = 0;
+    this.deathDuration = 0.8;
+    this.deathBurstTriggered = false;
 
     this.velocity = new Vector3();
     this.facingYaw = 0;
@@ -98,14 +104,9 @@ export class Enemy {
   }
 
   buildModel() {
-    // Overridden by subclasses with bespoke procedural geometries
+    // Implemented in subclasses
   }
 
-  /**
-   * Holographic In-World Ground Status Ring:
-   * Replaces cheap floating 2D billboards with a floor-projected holographic ring
-   * that projects contact shadow, circular health gauge arc, and elemental status glyphs.
-   */
   _buildGroundStatusRing() {
     const ringMat = new ShaderMaterial({
       transparent: true,
@@ -143,33 +144,25 @@ export class Enemy {
           float r = length(p);
           if(r > 1.0 || r < 0.35) discard;
 
-          // 1. Soft contact shadow core
           float shadow = smoothstep(0.7, 0.0, r) * 0.45;
 
-          // 2. Health Arc Gauge (0..1 angle)
-          float angle = atan(p.y, p.x); // -PI..PI
-          float normAngle = (angle + 3.14159265) / 6.2831853; // 0..1
+          float angle = atan(p.y, p.x);
+          float normAngle = (angle + 3.14159265) / 6.2831853;
           float arc = step(normAngle, uHealthFrac);
 
-          // Inner ring
           float ringDist = abs(r - 0.78);
           float ring = smoothstep(0.08, 0.0, ringDist);
 
-          // Health bar color
           vec3 healthCol = mix(uColorB, uColorA, smoothstep(0.2, 0.8, uHealthFrac));
 
-          // Status effect overrides
           if(uStatusFrozen > 0.01) healthCol = mix(healthCol, vec3(0.4, 0.9, 1.0), 0.85);
           else if(uStatusShocked > 0.01) healthCol = mix(healthCol, vec3(0.5, 0.75, 1.0), 0.85);
           else if(uStatusBurning > 0.01) healthCol = mix(healthCol, vec3(1.0, 0.4, 0.1), 0.85);
           else if(uStatusSnared > 0.01) healthCol = mix(healthCol, vec3(0.8, 0.4, 1.0), 0.85);
 
-          // Flash on hit
           healthCol += vec3(uHitFlash * 1.5);
 
-          // Pulse ticks around ring
           float ticks = smoothstep(0.45, 0.55, sin(angle * 12.0)) * 0.3;
-
           float alpha = (ring * (arc * 0.85 + 0.15) + ticks * ring * 0.4 + shadow);
           alpha *= smoothstep(1.0, 0.85, r);
 
@@ -188,7 +181,6 @@ export class Enemy {
     this.ringMat = ringMat;
   }
 
-  /** Apply damage from a weapon */
   takeDamage(rawAmount, element = 'physical', isCrit = false, knockbackDir = null) {
     if (!this.isAlive) return 0;
 
@@ -199,18 +191,27 @@ export class Enemy {
     this.hp = Math.max(0, this.hp - finalDamage);
     this.hitFlash = 1.0;
 
-    // Knockback
+    // Physical knockback
     if (knockbackDir) {
-      this.velocity.addScaledVector(knockbackDir, 5.0 / (this.scale * 1.1));
+      this.velocity.addScaledVector(knockbackDir, 5.5 / (this.scale * 1.1));
       this.state = EnemyState.STAGGER;
       this.staggerTimer = 0.22;
     }
 
     if (this.hp <= 0) {
-      this.state = EnemyState.DYING;
+      this.startDeath(element);
     }
 
     return finalDamage;
+  }
+
+  startDeath(element = 'ice') {
+    this.state = EnemyState.DYING;
+    this.deathElement = element;
+    this.deathTimer = 0;
+    this.deathDuration = element === 'meteor' ? 0.9 : element === 'ice' ? 0.75 : element === 'snare' ? 0.85 : 0.65;
+    this.deathBurstTriggered = false;
+    if (this.groundRing) this.groundRing.visible = false;
   }
 
   applyStatus(type, duration, strength = 1) {
@@ -234,10 +235,10 @@ export class Enemy {
     }
   }
 
-  update(dt, time, playerPos, onAttackCallback, onTickDamageCallback) {
+  update(dt, time, playerPos, onAttackCallback, onTickDamageCallback, onDeathBurstCallback) {
     if (this.state === EnemyState.DEAD) return;
 
-    // 1. Spawning Phase with smooth scale-up
+    // 1. Spawning Phase
     if (this.state === EnemyState.SPAWN) {
       this.spawnTimer += dt;
       const t = clamp(this.spawnTimer / this.spawnTime, 0, 1);
@@ -250,19 +251,99 @@ export class Enemy {
       return;
     }
 
+    // 2. Dynamic Elemental Death Sequence (The 5 Bespoke Transformations)
     if (this.state === EnemyState.DYING) {
+      this.deathTimer += dt;
+      const progress = clamp(this.deathTimer / this.deathDuration, 0, 1);
+
+      switch (this.deathElement) {
+        case 'ice':
+          // Flash-freeze into crystal statue, then shatter violently at t=0.3
+          if (progress < 0.3) {
+            for (const mat of this.materials) {
+              if (mat.uniforms && mat.uniforms.uFrozen) mat.uniforms.uFrozen.value = 1.0;
+            }
+          } else {
+            if (!this.deathBurstTriggered) {
+              this.deathBurstTriggered = true;
+              onDeathBurstCallback?.(this, 'ice');
+              this.group.visible = false;
+            }
+          }
+          break;
+
+        case 'thunder':
+          // Spasm violently with electric jitter & strobe, disintegrating into sparks
+          this.position.x += (Math.random() - 0.5) * 0.12;
+          this.position.z += (Math.random() - 0.5) * 0.12;
+          for (const mat of this.materials) {
+            if (mat.uniforms && mat.uniforms.uShocked) mat.uniforms.uShocked.value = 1.0;
+          }
+          if (progress >= 0.25 && !this.deathBurstTriggered) {
+            this.deathBurstTriggered = true;
+            onDeathBurstCallback?.(this, 'thunder');
+          }
+          if (progress >= 0.45) {
+            const sc = Math.max(0, this.scale * (1 - (progress - 0.45) / 0.55));
+            this.group.scale.set(sc, sc, sc);
+          }
+          break;
+
+        case 'meteor':
+          // Glow red-hot magma, swell up, and detonate with volcanic chunks
+          const swell = 1.0 + Math.sin(progress * Math.PI * 0.8) * 0.3;
+          this.group.scale.set(this.scale * swell, this.scale * swell, this.scale * swell);
+          for (const mat of this.materials) {
+            if (mat.uniforms && mat.uniforms.uHitFlash) mat.uniforms.uHitFlash.value = 1.0;
+          }
+          if (progress >= 0.25 && !this.deathBurstTriggered) {
+            this.deathBurstTriggered = true;
+            onDeathBurstCallback?.(this, 'meteor');
+            this.group.visible = false;
+          }
+          break;
+
+        case 'beam':
+          // Sliced and dissolved vertically into ascending laser motes
+          this.position.y -= dt * 1.8;
+          if (progress >= 0.15 && !this.deathBurstTriggered) {
+            this.deathBurstTriggered = true;
+            onDeathBurstCallback?.(this, 'beam');
+          }
+          const beamSc = Math.max(0, this.scale * (1 - progress));
+          this.group.scale.set(beamSc, beamSc, beamSc);
+          break;
+
+        case 'snare':
+          // Lifted into air, spinning & stretched into singularity
+          this.position.y += dt * 3.2;
+          this.group.rotation.y += dt * 22;
+          const sx = Math.max(0.01, this.scale * (1 - progress * 0.9));
+          const sy = this.scale * (1 + progress * 0.8);
+          this.group.scale.set(sx, sy, sx);
+          if (progress >= 0.6 && !this.deathBurstTriggered) {
+            this.deathBurstTriggered = true;
+            onDeathBurstCallback?.(this, 'snare');
+            this.group.visible = false;
+          }
+          break;
+      }
+
+      if (progress >= 1.0) {
+        this.state = EnemyState.DEAD;
+      }
       return;
     }
 
-    // 2. Status Effect Updates (DoT ticks & slowdown)
+    // 3. Status Effect Updates
     let speedMul = 1.0;
     if (this.status.frozen > 0) {
       this.status.frozen -= dt;
-      speedMul = 0.22; // 78% slow
+      speedMul = 0.22;
     }
     if (this.status.snared > 0) {
       this.status.snared -= dt;
-      speedMul = 0.04; // rooted
+      speedMul = 0.04;
     }
     if (this.status.shocked > 0) {
       this.status.shocked -= dt;
@@ -281,7 +362,7 @@ export class Enemy {
       }
     }
 
-    // 3. Stagger / Knockback recovery
+    // 4. Stagger Recovery
     if (this.state === EnemyState.STAGGER) {
       this.staggerTimer -= dt;
       if (this.staggerTimer <= 0) {
@@ -289,7 +370,7 @@ export class Enemy {
       }
     }
 
-    // 4. Movement & AI Locomotion
+    // 5. Movement & AI Locomotion
     const toPlayer = _tempVec.copy(playerPos).sub(this.position);
     toPlayer.y = 0;
     const distToPlayer = toPlayer.length();
@@ -298,14 +379,12 @@ export class Enemy {
       this.targetYaw = Math.atan2(toPlayer.x, toPlayer.z);
     }
 
-    // Smooth continuous yaw interpolation
     let diff = this.targetYaw - this.facingYaw;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     this.facingYaw += diff * Math.min(1, dt * 8.5);
     this.group.rotation.y = this.facingYaw;
 
-    // Acceleration & Velocity
     if (this.state === EnemyState.CHASE && distToPlayer > this.attackRange * 0.85) {
       const moveDir = toPlayer.clone().normalize();
       const currentSpeed = this.speed * speedMul;
@@ -319,7 +398,6 @@ export class Enemy {
     this.position.x += this.velocity.x * dt;
     this.position.z += this.velocity.z * dt;
 
-    // Arena boundary clamp
     const distFromCenter = Math.sqrt(this.position.x * this.position.x + this.position.z * this.position.z);
     if (distFromCenter > 24.5) {
       const angle = Math.atan2(this.position.z, this.position.x);
@@ -327,7 +405,7 @@ export class Enemy {
       this.position.z = Math.sin(angle) * 24.5;
     }
 
-    // 5. Attack Cycle
+    // 6. Attack Cycle
     this.attackTimer -= dt;
     if (this.state === EnemyState.CHASE && distToPlayer <= this.attackRange && this.attackTimer <= 0 && this.status.frozen <= 0) {
       this.state = EnemyState.ATTACK;
@@ -345,7 +423,7 @@ export class Enemy {
       }
     }
 
-    // 6. Hit Flash & Status Uniform Updates
+    // 7. Hit Flash & Status Uniform Updates
     this.hitFlash = Math.max(0, this.hitFlash - dt * 4.5);
     const healthFrac = clamp(this.hp / this.maxHp, 0, 1);
 
@@ -365,10 +443,6 @@ export class Enemy {
         if (mat.uniforms.uTime) mat.uniforms.uTime.value = time;
         if (mat.uniforms.uFrozen) mat.uniforms.uFrozen.value = this.status.frozen > 0 ? 1 : 0;
         if (mat.uniforms.uShocked) mat.uniforms.uShocked.value = this.status.shocked > 0 ? 1 : 0;
-      } else if (mat.emissive) {
-        const flashColor = this.status.frozen > 0 ? '#80e0ff' : '#ff4444';
-        mat.emissive.set(flashColor);
-        mat.emissiveIntensity = this.hitFlash * 2.5 + (this.status.shocked > 0 ? Math.sin(time * 35) * 0.8 + 0.8 : 0.2);
       }
     }
 

@@ -9,22 +9,26 @@ import {
   Object3D,
   PlaneGeometry,
   ShaderMaterial,
-  Vector3
+  Vector3,
+  AdditiveBlending,
+  DoubleSide
 } from 'three';
-import { settings } from './settings';
+import { settings, ELEMENT_META } from './settings';
 import { damp, clamp } from './util';
 import { soundSynth } from './audio/SoundSynth';
 
 /**
  * Animated battle-mage character with WASD movement, procedural step cycles,
- * dash dodging with ghost afterimages, health & auto-recharging shield.
+ * cast lunge & elemental hand muzzle flash, dash dodging with ghost afterimages,
+ * health & auto-recharging shield.
  */
 export class Character {
   constructor(scene) {
     this.scene = scene;
     this.root = new Group();
     this.yaw = 0;
-    this.cast = 0; // 0..1 cast lunge envelope
+    this.cast = 0;
+    this.castElement = 'ice';
     this.bob = 0;
 
     // Movement & Physics
@@ -83,19 +87,39 @@ export class Character {
     this.root.add(this.torso);
 
     add(new CapsuleGeometry(0.3, 0.66, 6, 14), suit, this.torso, 0, 0.0, 0);
-    add(new SphereGeometry(0.23, 18, 18), suit, this.torso, 0, 0.62, 0); // head
-    this.faceGlow = add(new SphereGeometry(0.06, 10, 10), trim, this.torso, 0, 0.62, 0.22); // face glow
-    this.chestCore = add(new CapsuleGeometry(0.09, 0.5, 5, 10), trim, this.torso, 0, 0.12, 0.18); // chest core
+    add(new SphereGeometry(0.23, 18, 18), suit, this.torso, 0, 0.62, 0);
+    this.faceGlow = add(new SphereGeometry(0.06, 10, 10), trim, this.torso, 0, 0.62, 0.22);
+    this.chestCore = add(new CapsuleGeometry(0.09, 0.5, 5, 10), trim, this.torso, 0, 0.12, 0.18);
 
     // shoulders + arms
     this.rArm = new Group();
     this.rArm.position.set(0.34, 0.28, 0);
     this.torso.add(this.rArm);
     add(new CapsuleGeometry(0.09, 0.5, 5, 10), suit, this.rArm, 0, -0.32, 0);
+
     this.rHand = new Object3D();
     this.rHand.position.set(0, -0.62, 0);
     this.rArm.add(this.rHand);
     add(new SphereGeometry(0.09, 10, 10), suit, this.rHand, 0, 0, 0);
+
+    // Elemental Hand Cast Flare
+    const flareMat = new ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: DoubleSide,
+      blending: AdditiveBlending,
+      uniforms: {
+        uColor: { value: new Color('#9fe8ff') },
+        uOpacity: { value: 0.0 }
+      },
+      vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+      fragmentShader: `varying vec2 vUv; uniform vec3 uColor; uniform float uOpacity; void main(){ float d=length(vUv-0.5)*2.0; float a=smoothstep(1.0,0.0,d)*uOpacity; gl_FragColor=vec4(uColor*1.5,a); }`
+    });
+    this.castFlare = new Mesh(new PlaneGeometry(0.85, 0.85), flareMat);
+    this.castFlare.renderOrder = 10;
+    this.castFlare.visible = false;
+    this.rHand.add(this.castFlare);
+    this.flareMat = flareMat;
 
     this.lArm = new Group();
     this.lArm.position.set(-0.34, 0.28, 0);
@@ -142,14 +166,19 @@ export class Character {
     this._targetYaw = yaw;
   }
 
-  triggerCast() {
-    this.cast = 1;
+  triggerCast(element = 'ice') {
+    this.cast = 1.0;
+    this.castElement = element;
+    const meta = ELEMENT_META[element] || { color: '#9fe8ff' };
+    this.flareMat.uniforms.uColor.value.set(meta.color);
+    this.flareMat.uniforms.uOpacity.value = 1.0;
+    this.castFlare.visible = true;
+    this.castFlare.scale.set(1.5, 1.5, 1.5);
   }
 
   dash() {
     if (this.dashCooldownTimer > 0 || this.isDashing || this.isDead) return false;
 
-    // Dash in movement direction or facing direction
     if (this.moveInput.lengthSq() > 0.01) {
       this.dashDir.copy(this.moveInput).normalize();
     } else {
@@ -161,7 +190,6 @@ export class Character {
     this.dashCooldownTimer = this.dashCooldown * this.buffs.cooldownMul;
     soundSynth.playDash();
 
-    // Spawn afterimage ghost
     this._spawnGhost();
     return true;
   }
@@ -189,7 +217,6 @@ export class Character {
     this.timeSinceLastHit = 0;
     this.invulnerableTimer = 0.35;
 
-    // Absorb with shield first
     if (this.shield > 0) {
       const absorbed = Math.min(this.shield, remaining);
       this.shield -= absorbed;
@@ -223,7 +250,6 @@ export class Character {
     this.invulnerableTimer = 0;
   }
 
-  /** World position of the right hand — where bolts/beams leave the caster. */
   handPos(out = new Vector3()) {
     this.rHand.getWorldPosition(out);
     if (out.y < 0.4) out.y = 1.3;
@@ -243,7 +269,6 @@ export class Character {
     }
 
     this.timeSinceLastHit += dt;
-    // Auto-recharge shield after delay
     const totalMaxShield = this.maxShield + this.buffs.shieldBonus;
     if (this.timeSinceLastHit > this.shieldRegenDelay && this.shield < totalMaxShield) {
       this.shield = Math.min(totalMaxShield, this.shield + 22 * dt);
@@ -266,7 +291,6 @@ export class Character {
     this.root.position.x += this.velocity.x * dt;
     this.root.position.z += this.velocity.z * dt;
 
-    // Arena boundary clamp (radius 24.5m)
     const distSq = this.root.position.x * this.root.position.x + this.root.position.z * this.root.position.z;
     if (distSq > 24.5 * 24.5) {
       const ang = Math.atan2(this.root.position.z, this.root.position.x);
@@ -274,12 +298,12 @@ export class Character {
       this.root.position.z = Math.sin(ang) * 24.5;
     }
 
-    // 2. Smooth Yaw Rotation to Aim
+    // 2. Smooth Yaw Rotation
     if (this._targetYaw !== undefined) {
       let diff = this._targetYaw - this.yaw;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      this.yaw += diff * Math.min(1, dt * 10);
+      this.yaw += diff * Math.min(1, dt * 14);
     }
     this.root.rotation.y = this.yaw;
 
@@ -303,12 +327,23 @@ export class Character {
     }
     this.root.position.y = this.bob;
 
-    // 4. Cast Lunge: spike then decay
-    this.cast = Math.max(0, this.cast - dt / 0.5);
-    const c = this.cast;
-    this.rArm.rotation.x = damp(this.rArm.rotation.x, -1.7 * c - 0.1, 12, dt);
-    this.rArm.rotation.z = damp(this.rArm.rotation.z, -0.2 * c, 12, dt);
-    this.torso.rotation.x = damp(this.torso.rotation.x, 0.25 * c, 10, dt);
+    // 4. Cast Lunge: Arm thrust, recoil & flare fade
+    if (this.cast > 0) {
+      this.cast = Math.max(0, this.cast - dt / 0.35);
+      const c = this.cast;
+      this.rArm.rotation.x = damp(this.rArm.rotation.x, -2.0 * c - 0.1, 16, dt);
+      this.rArm.rotation.z = damp(this.rArm.rotation.z, -0.3 * c, 16, dt);
+      this.torso.rotation.x = damp(this.torso.rotation.x, 0.35 * c, 14, dt);
+
+      this.flareMat.uniforms.uOpacity.value = c;
+      const fScale = 1.0 + (1 - c) * 0.8;
+      this.castFlare.scale.set(fScale, fScale, fScale);
+      if (c <= 0.01) this.castFlare.visible = false;
+    } else {
+      this.rArm.rotation.x = damp(this.rArm.rotation.x, -0.1, 10, dt);
+      this.rArm.rotation.z = damp(this.rArm.rotation.z, 0, 10, dt);
+      this.torso.rotation.x = damp(this.torso.rotation.x, 0, 10, dt);
+    }
 
     // Hit invulnerability flicker
     if (this.invulnerableTimer > 0) {
@@ -323,7 +358,7 @@ export class Character {
     // Shadow follow
     this.shadow.position.x = this.root.position.x;
     this.shadow.position.z = this.root.position.z;
-    this.shadow.scale.setScalar(1 + c * 0.2);
+    this.shadow.scale.setScalar(1 + this.cast * 0.2);
 
     // 5. Update Ghosts
     for (let i = this.ghosts.length - 1; i >= 0; i--) {
@@ -348,6 +383,7 @@ export class Character {
     this.scene.remove(this.root, this.shadow);
     this.shadowMat.dispose();
     this.shadow.geometry.dispose();
+    this.flareMat.dispose();
     for (const g of this.ghosts) {
       this.scene.remove(g.mesh);
       g.geo.dispose();

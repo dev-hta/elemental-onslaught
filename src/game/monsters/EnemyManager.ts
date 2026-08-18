@@ -4,22 +4,33 @@ import { VoidCrawler, ObsidianGolem, AetherPhantom, PyreFiend, GloomBehemoth } f
 import { DestructionEffects } from './DestructionEffects';
 import { soundSynth } from '../audio/SoundSynth';
 
+const _tempVec = new Vector3();
 const _lineStart = new Vector3();
 const _lineEnd = new Vector3();
 const _point = new Vector3();
-const _closest = new Vector3();
 
-/** Calculate distance from point P to line segment AB on the XZ plane */
 function distToSegmentXZ(p, a, b) {
-  const l2 = (b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z);
-  if (l2 === 0) return Math.sqrt((p.x - a.x) * (p.x - a.x) + (p.z - a.z) * (p.z - a.z));
-  let t = ((p.x - a.x) * (b.x - a.x) + (p.z - a.z) * (b.z - a.z)) / l2;
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const l2 = dx * dx + dz * dz;
+  if (l2 === 0) {
+    const px = p.x - a.x;
+    const pz = p.z - a.z;
+    return Math.sqrt(px * px + pz * pz);
+  }
+  let t = ((p.x - a.x) * dx + (p.z - a.z) * dz) / l2;
   t = Math.max(0, Math.min(1, t));
-  const projX = a.x + t * (b.x - a.x);
-  const projZ = a.z + t * (b.z - a.z);
-  return Math.sqrt((p.x - projX) * (p.x - projX) + (p.z - projZ) * (p.z - projZ));
+  const cx = a.x + t * dx;
+  const cz = a.z + t * dz;
+  const px = p.x - cx;
+  const pz = p.z - cz;
+  return Math.sqrt(px * px + pz * pz);
 }
 
+/**
+ * Manages monster spawning waves, spatial hit detection across all 5 spells,
+ * flocking separation, and damage routing with physical feedback.
+ */
 export class EnemyManager {
   constructor(scene, ctx, damageNumbers) {
     this.scene = scene;
@@ -29,9 +40,9 @@ export class EnemyManager {
 
     this.enemies = [];
     this.currentWave = 1;
-    this.waveState = 'active'; // 'active' | 'cleared' | 'spawning'
+    this.waveState = 'active';
     this.waveSpawnQueue = [];
-    this.spawnInterval = 0.6;
+    this.spawnInterval = 0.55;
     this.spawnTimer = 0;
 
     this.totalKills = 0;
@@ -40,8 +51,7 @@ export class EnemyManager {
     this.onWaveClear = null;
     this.onPlayerDamaged = null;
 
-    // Ability hit tracking (prevent multi-hits per ability frame)
-    this.hitCooldowns = new Map(); // key: `abilityUid_enemyId` -> lastHitTime
+    this.hitCooldowns = new Map();
   }
 
   get aliveCount() {
@@ -57,7 +67,7 @@ export class EnemyManager {
     this.waveState = 'spawning';
     this.waveSpawnQueue = this._generateWaveQueue(waveNumber);
     this._totalInCurrentWave = this.waveSpawnQueue.length;
-    this.spawnTimer = 1.0;
+    this.spawnTimer = 0.8;
     soundSynth.playWaveStart();
   }
 
@@ -80,12 +90,11 @@ export class EnemyManager {
       for (let i = 0; i < 3; i++) queue.push('golem');
       for (let i = 0; i < 3; i++) queue.push('phantom');
     } else if (wave === 5) {
-      queue.push('behemoth'); // Wave 5 Boss!
+      queue.push('behemoth');
       for (let i = 0; i < 4; i++) queue.push('crawler');
       for (let i = 0; i < 2; i++) queue.push('golem');
       for (let i = 0; i < 2; i++) queue.push('phantom');
     } else {
-      // Scaled procedural endless waves
       const count = Math.min(24, baseCount);
       const types = ['crawler', 'golem', 'phantom', 'pyrefiend'];
       if (wave % 5 === 0) queue.push('behemoth');
@@ -98,9 +107,8 @@ export class EnemyManager {
   }
 
   _spawnEnemy(type) {
-    // Spawn around arena perimeter (radius 18..24)
     const angle = Math.random() * Math.PI * 2;
-    const r = 18 + Math.random() * 5;
+    const r = 20 + Math.random() * 4;
     const spawnX = Math.cos(angle) * r;
     const spawnZ = Math.sin(angle) * r;
 
@@ -143,7 +151,7 @@ export class EnemyManager {
       }
     }
 
-    // 2. Check Hit Detections with Abilities
+    // 2. Hit Detections with Active Abilities
     if (abilities && abilities.active) {
       for (const ability of abilities.active) {
         if (!ability.isActive) continue;
@@ -151,21 +159,16 @@ export class EnemyManager {
       }
     }
 
-    // 3. Enemy Flocking / Collision Separation
+    // 3. Enemy Flocking Separation
     this._applyEnemySeparation(dt);
 
     // 4. Update Each Enemy
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const enemy = this.enemies[i];
+
       if (enemy.state === 'dead') {
         enemy.dispose();
         this.enemies.splice(i, 1);
-        continue;
-      }
-
-      if (enemy.state === 'dying') {
-        // Will be cleaned up once destruction finishes
-        enemy.state = 'dead';
         continue;
       }
 
@@ -174,17 +177,19 @@ export class EnemyManager {
         time,
         player.position,
         (atkEnemy, dmg) => {
-          // Enemy attacks player
           soundSynth.playPlayerHit();
           this.onPlayerDamaged?.(dmg);
         },
         (tickEnemy, tickDmg, el) => {
-          // DoT ticks
           const dealt = tickEnemy.takeDamage(tickDmg, el, false);
           this.damageNumbers.spawn(tickEnemy.position, `${dealt}`, el);
-          if (!tickEnemy.isAlive) {
+          if (!tickEnemy.isAlive && tickEnemy.state !== 'dying' && tickEnemy.state !== 'dead') {
             this._killEnemy(tickEnemy, el);
           }
+        },
+        (dyingEnemy, el) => {
+          // Trigger the physical debris / particles at the exact transformation burst
+          this.destruction.triggerDeath(dyingEnemy, el);
         }
       );
     }
@@ -211,15 +216,13 @@ export class EnemyManager {
       const hitKey = `${uid}_${enemy.id}`;
       const lastHit = this.hitCooldowns.get(hitKey) || 0;
 
-      // Check per-ability shape collisions
       if (el === 'ice') {
-        // Linear skillshot: front check
         const dist = distToSegmentXZ(ePos, _lineStart, _lineEnd);
-        if (dist <= enemy.radius + 1.2 && time - lastHit > 0.4) {
+        if (dist <= enemy.radius + 1.2 && time - lastHit > 0.35) {
           this.hitCooldowns.set(hitKey, time);
           const isCrit = Math.random() < 0.25;
-          const dmg = enemy.takeDamage(85, 'ice', isCrit, ability.direction);
-          enemy.applyStatus('frozen', 2.2);
+          const dmg = enemy.takeDamage(90, 'ice', isCrit, ability.direction);
+          enemy.applyStatus('frozen', 2.4);
           this.damageNumbers.spawn(ePos, isCrit ? `CRIT ${dmg}!` : `${dmg}`, 'ice', isCrit);
           soundSynth.playEnemyHit();
 
@@ -228,35 +231,33 @@ export class EnemyManager {
           }
         }
       } else if (el === 'thunder') {
-        // Linear strike + chain lightning
         const dist = distToSegmentXZ(ePos, _lineStart, _lineEnd);
-        if (dist <= enemy.radius + 1.3 && time - lastHit > 0.35) {
+        if (dist <= enemy.radius + 1.3 && time - lastHit > 0.3) {
           this.hitCooldowns.set(hitKey, time);
           const isCrit = Math.random() < 0.3;
-          const dmg = enemy.takeDamage(95, 'thunder', isCrit, ability.direction);
+          const dmg = enemy.takeDamage(100, 'thunder', isCrit, ability.direction);
           enemy.applyStatus('shocked', 2.0);
           this.damageNumbers.spawn(ePos, isCrit ? `SHOCK ${dmg}!` : `${dmg}`, 'thunder', isCrit);
           soundSynth.playEnemyHit();
 
-          // Chain lightning to 2 nearby enemies
-          this._chainLightning(enemy, 55, 2);
+          this._chainLightning(enemy, 60, 2);
 
           if (!enemy.isAlive) {
             this._killEnemy(enemy, 'thunder');
           }
         }
       } else if (el === 'meteor') {
-        // Parabolic arc / impact detonation
         if (ability.phase === 'impact' || ability.phase === 'fade') {
           const impactPos = ability.pointAt ? ability.pointAt(1, _point) : ability.position;
           const d = Math.sqrt((ePos.x - impactPos.x) * (ePos.x - impactPos.x) + (ePos.z - impactPos.z) * (ePos.z - impactPos.z));
-          const explosionRadius = 4.2;
-          if (d <= explosionRadius + enemy.radius && time - lastHit > 0.6) {
+          const explosionRadius = 4.5;
+          if (d <= explosionRadius + enemy.radius && time - lastHit > 0.5) {
             this.hitCooldowns.set(hitKey, time);
             const knockDir = ePos.clone().sub(impactPos).normalize();
+            knockDir.y = 0.8; // launch upward
             const isCrit = Math.random() < 0.35;
-            const dmg = enemy.takeDamage(160, 'meteor', isCrit, knockDir);
-            enemy.applyStatus('burning', 3.0, 30);
+            const dmg = enemy.takeDamage(170, 'meteor', isCrit, knockDir);
+            enemy.applyStatus('burning', 3.2, 35);
             this.damageNumbers.spawn(ePos, isCrit ? `BLAST ${dmg}!` : `${dmg}`, 'meteor', isCrit);
             soundSynth.playEnemyHit();
 
@@ -266,12 +267,11 @@ export class EnemyManager {
           }
         }
       } else if (el === 'beam') {
-        // Continuous laser cylinder
         const dist = distToSegmentXZ(ePos, _lineStart, _lineEnd);
-        if (dist <= enemy.radius + 1.1 && time - lastHit > 0.12) {
+        if (dist <= enemy.radius + 1.15 && time - lastHit > 0.1) {
           this.hitCooldowns.set(hitKey, time);
           const isCrit = Math.random() < 0.2;
-          const dmg = enemy.takeDamage(28, 'beam', isCrit, ability.direction);
+          const dmg = enemy.takeDamage(32, 'beam', isCrit, ability.direction);
           this.damageNumbers.spawn(ePos, `${dmg}`, 'beam', isCrit);
 
           if (!enemy.isAlive) {
@@ -279,19 +279,17 @@ export class EnemyManager {
           }
         }
       } else if (el === 'snare') {
-        // Far cast vortex zone
         const center = ability._center ? ability._center() : ability.position;
-        const rad = ability.config?.zoneRadius || 3.2;
+        const rad = ability.config?.zoneRadius || 3.4;
         const d = Math.sqrt((ePos.x - center.x) * (ePos.x - center.x) + (ePos.z - center.z) * (ePos.z - center.z));
-        if (d <= rad + enemy.radius && time - lastHit > 0.25) {
+        if (d <= rad + enemy.radius && time - lastHit > 0.22) {
           this.hitCooldowns.set(hitKey, time);
-          // Pull toward center
           const pullDir = center.clone().sub(ePos).normalize();
-          enemy.velocity.addScaledVector(pullDir, 3.5);
-          enemy.applyStatus('snared', 1.8);
+          enemy.velocity.addScaledVector(pullDir, 4.0);
+          enemy.applyStatus('snared', 2.0);
 
           const isCrit = Math.random() < 0.2;
-          const dmg = enemy.takeDamage(45, 'snare', isCrit);
+          const dmg = enemy.takeDamage(50, 'snare', isCrit);
           this.damageNumbers.spawn(ePos, `${dmg}`, 'snare', isCrit);
 
           if (!enemy.isAlive) {
@@ -307,9 +305,9 @@ export class EnemyManager {
     for (const other of this.enemies) {
       if (other === sourceEnemy || !other.isAlive) continue;
       const d = sourceEnemy.position.distanceTo(other.position);
-      if (d <= 5.5) {
+      if (d <= 6.0) {
         const dealt = other.takeDamage(dmg, 'thunder', false);
-        other.applyStatus('shocked', 1.5);
+        other.applyStatus('shocked', 1.6);
         this.damageNumbers.spawn(other.position, `⚡ ${dealt}`, 'thunder');
         if (!other.isAlive) {
           this._killEnemy(other, 'thunder');
@@ -323,7 +321,7 @@ export class EnemyManager {
   _killEnemy(enemy, element) {
     this.totalKills++;
     this.elementalKills[element] = (this.elementalKills[element] || 0) + 1;
-    this.destruction.triggerDeath(enemy, element);
+    enemy.startDeath(element);
     this.onKill?.(enemy, element);
   }
 

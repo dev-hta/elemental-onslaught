@@ -203,7 +203,7 @@ export class Engine {
     this.aim.on('cast', (origin, dir, dist) => {
       const el = this.aim.element;
       if (this.abilities.cast(el, origin, dir, dist)) {
-        this.character.triggerCast();
+        this.character.triggerCast(el);
         soundSynth.playCast(el);
       }
     });
@@ -244,7 +244,7 @@ export class Engine {
     const el = ELEMENTS[slot];
     if (!el) return;
     if (this.aim.isArmed && this.aim.element === el) {
-      this.aim.cancel();
+      this.doConfirm();
       return;
     }
     this.aim.setElement(el);
