@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Engine } from './game/Engine';
 import { ELEMENT_META } from './game/settings';
 
@@ -43,6 +43,14 @@ export default function App() {
   const radarCanvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<any>(null);
 
+  // Virtual Joystick Touch Ref
+  const joystickRef = useRef<{ touchId: number | null; startX: number; startY: number }>({
+    touchId: null,
+    startX: 0,
+    startY: 0
+  });
+  const [joystickKnob, setJoystickKnob] = useState({ x: 0, y: 0, active: false });
+
   const [stats, setStats] = useState<Stats>({ fps: 0, particles: 0, instances: 0, draws: 0 });
   const [hud, setHud] = useState<HudState>({
     armed: false,
@@ -76,6 +84,11 @@ export default function App() {
     playerPos: { x: 0, z: 0 }
   });
   const [loaded, setLoaded] = useState(false);
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
+
+  useEffect(() => {
+    setIsTouchDevice('ontouchstart' in window || navigator.maxTouchPoints > 0);
+  }, []);
 
   useEffect(() => {
     if (!mountRef.current) return;
@@ -84,7 +97,7 @@ export default function App() {
     engine.onStats = (s: Stats) => setStats(s);
     engine.onState = (h: HudState) => setHud(h);
     engine.start();
-    const t = setTimeout(() => setLoaded(true), 600);
+    const t = setTimeout(() => setLoaded(true), 500);
     return () => {
       clearTimeout(t);
       engine.dispose();
@@ -92,7 +105,7 @@ export default function App() {
     };
   }, []);
 
-  // Tactical Minimap Radar Canvas Rendering
+  // Tactical Minimap Radar Canvas
   useEffect(() => {
     const canvas = radarCanvasRef.current;
     if (!canvas) return;
@@ -132,26 +145,26 @@ export default function App() {
         const bx = cx + blip.x * scale;
         const by = cy + blip.z * scale;
 
-        let color = '#f87171'; // Red for crawler
-        let dotR = 2.6;
+        let color = '#f87171';
+        let dotR = 2.4;
 
         if (blip.type === 'golem') {
           color = '#fb923c';
-          dotR = 3.8;
+          dotR = 3.6;
         } else if (blip.type === 'phantom') {
           color = '#38bdf8';
-          dotR = 3.0;
+          dotR = 2.8;
         } else if (blip.type === 'pyrefiend') {
           color = '#f43f5e';
-          dotR = 3.2;
+          dotR = 3.0;
         } else if (blip.type === 'behemoth') {
           color = '#e11d48';
-          dotR = 5.5;
+          dotR = 5.0;
         }
 
         ctx.fillStyle = color;
         ctx.shadowColor = color;
-        ctx.shadowBlur = 6;
+        ctx.shadowBlur = 5;
         ctx.beginPath();
         ctx.arc(bx, by, dotR, 0, Math.PI * 2);
         ctx.fill();
@@ -165,9 +178,9 @@ export default function App() {
       const py = cy + hud.playerPos.z * scale;
       ctx.fillStyle = '#22d3ee';
       ctx.shadowColor = '#22d3ee';
-      ctx.shadowBlur = 8;
+      ctx.shadowBlur = 7;
       ctx.beginPath();
-      ctx.arc(px, py, 3.2, 0, Math.PI * 2);
+      ctx.arc(px, py, 3.0, 0, Math.PI * 2);
       ctx.fill();
       ctx.shadowBlur = 0;
     }
@@ -175,11 +188,60 @@ export default function App() {
 
   const e = () => engineRef.current;
 
+  // Virtual Joystick Handlers for Touch Screens
+  const handleJoystickStart = useCallback((evt: React.TouchEvent<HTMLDivElement>) => {
+    if (evt.touches.length === 0) return;
+    const touch = evt.touches[0];
+    const rect = evt.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    joystickRef.current = {
+      touchId: touch.identifier,
+      startX: centerX,
+      startY: centerY
+    };
+
+    setJoystickKnob({ x: 0, y: 0, active: true });
+  }, []);
+
+  const handleJoystickMove = useCallback((evt: React.TouchEvent<HTMLDivElement>) => {
+    if (joystickRef.current.touchId === null) return;
+    for (let i = 0; i < evt.touches.length; i++) {
+      const touch = evt.touches[i];
+      if (touch.identifier === joystickRef.current.touchId) {
+        const dx = touch.clientX - joystickRef.current.startX;
+        const dy = touch.clientY - joystickRef.current.startY;
+        const maxRadius = 45; // max pixel distance
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const clampedDist = Math.min(dist, maxRadius);
+        const angle = Math.atan2(dy, dx);
+
+        const knobX = Math.cos(angle) * clampedDist;
+        const knobY = Math.sin(angle) * clampedDist;
+
+        setJoystickKnob({ x: knobX, y: knobY, active: true });
+
+        // Normalize to -1..1 and feed to Engine (y inverted for forward/back)
+        const normX = knobX / maxRadius;
+        const normY = -(knobY / maxRadius);
+        e()?.setVirtualMove(normX, normY);
+        break;
+      }
+    }
+  }, []);
+
+  const handleJoystickEnd = useCallback((_evt: React.TouchEvent<HTMLDivElement>) => {
+    joystickRef.current = { touchId: null, startX: 0, startY: 0 };
+    setJoystickKnob({ x: 0, y: 0, active: false });
+    e()?.setVirtualMove(0, 0);
+  }, []);
+
   const healthFrac = Math.max(0, Math.min(1, hud.health / hud.maxHealth));
   const shieldFrac = Math.max(0, Math.min(1, hud.shield / Math.max(1, hud.maxShield)));
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[#05070d] font-sans text-white select-none">
+    <div className="relative h-screen w-screen overflow-hidden bg-[#05070d] font-sans text-white select-none touch-none">
       <div ref={mountRef} className="absolute inset-0" />
 
       {/* Loading splash */}
@@ -197,45 +259,45 @@ export default function App() {
       {/* Pause veil */}
       {hud.paused && (
         <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-md">
-          <div className="rounded-2xl border border-white/10 bg-[#080c16]/90 px-10 py-6 text-center shadow-2xl">
+          <div className="rounded-2xl border border-white/10 bg-[#080c16]/90 px-8 py-5 text-center shadow-2xl">
             <div className="text-2xl font-light tracking-[0.35em] text-cyan-300">PAUSED</div>
             <div className="mt-2 text-xs text-white/50">
-              Press <span className="font-mono text-cyan-400 font-bold">P</span> to resume · WASD to move · Click to cast
+              {isTouchDevice ? 'Tap Pause icon to resume' : 'Press P to resume · WASD to move · Click to cast'}
             </div>
           </div>
         </div>
       )}
 
       {/* Top-Center: Wave Info, Progress & Score Header */}
-      <div className="pointer-events-none absolute top-4 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-1.5">
-        <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-[#080c16]/80 px-5 py-2 backdrop-blur-xl shadow-lg shadow-black/40">
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-cyan-400">⚔️</span>
-            <div className="font-mono text-xs font-bold tracking-widest text-cyan-200 uppercase">
+      <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-1.5 max-w-[95vw]">
+        <div className="flex items-center gap-2.5 sm:gap-4 rounded-xl border border-white/10 bg-[#080c16]/80 px-3.5 sm:px-5 py-1.5 sm:py-2 backdrop-blur-xl shadow-lg shadow-black/40">
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <span className="text-xs sm:text-sm text-cyan-400">⚔️</span>
+            <div className="font-mono text-[11px] sm:text-xs font-bold tracking-widest text-cyan-200 uppercase">
               WAVE {hud.currentWave}
             </div>
           </div>
 
-          <div className="h-3.5 w-px bg-white/10" />
+          <div className="h-3 w-px bg-white/10" />
 
-          <div className="flex items-center gap-1.5 font-mono text-[11px] text-white/70">
-            <span className="text-white/40">HOSTILES:</span>
+          <div className="flex items-center gap-1 font-mono text-[10px] sm:text-[11px] text-white/70">
+            <span className="text-white/40">MOBS:</span>
             <span className={`font-bold ${hud.aliveCount <= 3 ? 'text-amber-400 animate-pulse' : 'text-white/90'}`}>
               {hud.aliveCount}
             </span>
           </div>
 
-          <div className="h-3.5 w-px bg-white/10" />
+          <div className="h-3 w-px bg-white/10" />
 
-          <div className="flex items-center gap-1.5 font-mono text-[11px]">
+          <div className="flex items-center gap-1 font-mono text-[10px] sm:text-[11px]">
             <span className="text-white/40">SCORE:</span>
             <span className="font-bold text-amber-300 tracking-wide text-xs">{hud.score.toLocaleString()}</span>
           </div>
 
           {hud.highScore > 0 && (
             <>
-              <div className="h-3.5 w-px bg-white/10" />
-              <div className="flex items-center gap-1 font-mono text-[10px] text-white/40">
+              <div className="h-3 w-px bg-white/10 hidden sm:block" />
+              <div className="hidden sm:flex items-center gap-1 font-mono text-[10px] text-white/40">
                 <span>HI:</span>
                 <span className="text-white/70">{hud.highScore.toLocaleString()}</span>
               </div>
@@ -245,12 +307,12 @@ export default function App() {
 
         {/* Combo Multiplier Bar */}
         {hud.combo > 1 && (
-          <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-950/70 px-3.5 py-1 backdrop-blur-xl shadow-md">
+          <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-950/70 px-3 py-0.5 backdrop-blur-xl shadow-md">
             <span className="text-xs">🔥</span>
-            <span className="font-mono text-xs font-bold tracking-wider text-amber-300">
+            <span className="font-mono text-[11px] font-bold tracking-wider text-amber-300">
               {hud.comboMultiplier.toFixed(2)}x COMBO
             </span>
-            <div className="h-1.5 w-14 overflow-hidden rounded-full bg-black/50">
+            <div className="h-1 w-12 overflow-hidden rounded-full bg-black/50">
               <div
                 className="h-full bg-amber-400 transition-all duration-100"
                 style={{ width: `${Math.max(0, (hud.comboTimer / 3.8) * 100)}%` }}
@@ -261,18 +323,14 @@ export default function App() {
       </div>
 
       {/* Top-Left: Game Title & Kill Breakdown */}
-      <div className="pointer-events-none absolute left-5 top-4 z-20">
-        <div className="flex items-center gap-2">
-          <span className="text-lg text-cyan-400">❄⚡</span>
-          <h1 className="text-xs font-bold uppercase tracking-[0.25em] text-white/90">Elemental Onslaught</h1>
+      <div className="pointer-events-none absolute left-3.5 sm:left-5 top-3 sm:top-4 z-20">
+        <div className="flex items-center gap-1.5">
+          <span className="text-base sm:text-lg text-cyan-400">❄⚡</span>
+          <h1 className="text-[11px] sm:text-xs font-bold uppercase tracking-[0.2em] text-white/90">Elemental Onslaught</h1>
         </div>
-        <p className="mt-0.5 text-[10px] tracking-wider text-white/40">
-          WASD Move · Space Dash · 5 Elemental Skillshots
-        </p>
 
         {/* Elemental Kill Counter Pills */}
-        <div className="mt-2 flex items-center gap-1">
-          <span className="font-mono text-[9px] text-white/40 uppercase tracking-wider">KILLS:</span>
+        <div className="mt-1.5 flex items-center gap-1">
           <KillPill icon="❄" count={hud.elementalKills.ice} color="#9fe8ff" title="Frost Shatters" />
           <KillPill icon="⚡" count={hud.elementalKills.thunder} color="#7fb8ff" title="Storm Zaps" />
           <KillPill icon="☄" count={hud.elementalKills.meteor} color="#ff8a3a" title="Meteor Blasts" />
@@ -281,35 +339,25 @@ export default function App() {
         </div>
       </div>
 
-      {/* Top-Right: Holographic Minimap & Performance Stats */}
-      <div className="pointer-events-none absolute right-4 top-4 z-20 flex flex-col items-end gap-1.5">
-        <div className="relative rounded-2xl border border-white/10 bg-[#080c16]/80 p-2 backdrop-blur-xl shadow-lg">
-          <div className="absolute top-2 left-3 font-mono text-[9px] uppercase tracking-widest text-cyan-400/60">
-            RADAR · ARENA
+      {/* Top-Right: Holographic Minimap Radar */}
+      <div className="pointer-events-none absolute right-3 sm:right-4 top-3 sm:top-4 z-20 flex flex-col items-end gap-1">
+        <div className="relative rounded-2xl border border-white/10 bg-[#080c16]/80 p-1.5 backdrop-blur-xl shadow-lg">
+          <div className="absolute top-1.5 left-2.5 font-mono text-[8px] uppercase tracking-widest text-cyan-400/60">
+            RADAR
           </div>
-          <canvas ref={radarCanvasRef} width={120} height={120} className="rounded-xl block" />
-        </div>
-
-        <div className="rounded-lg border border-white/10 bg-[#080c16]/60 px-2.5 py-1 text-right font-mono text-[9px] text-white/50 backdrop-blur-sm">
-          <div className="flex items-center justify-between gap-2.5">
-            <span>FPS</span>
-            <span className={stats.fps >= 50 ? 'text-emerald-300 font-bold' : 'text-amber-300 font-bold'}>{stats.fps}</span>
-            <span className="text-white/20">|</span>
-            <span>VFX</span>
-            <span className="text-white/70">{stats.particles}</span>
-          </div>
+          <canvas ref={radarCanvasRef} width={88} height={88} className="rounded-xl block sm:w-[110px] sm:h-[110px]" />
         </div>
       </div>
 
       {/* Right: Floating Kill Feed Popups */}
-      <div className="pointer-events-none absolute right-5 top-44 z-20 flex flex-col items-end gap-1.5">
-        {hud.killFeed.map((kf) => {
+      <div className="pointer-events-none absolute right-3.5 sm:right-5 top-36 sm:top-40 z-20 flex flex-col items-end gap-1">
+        {hud.killFeed.slice(0, 3).map((kf) => {
           const meta = (ELEMENT_META as any)[kf.element] || { color: '#ffffff', label: kf.element };
           return (
             <div
               key={kf.id}
-              className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#080c16]/80 px-3 py-1 text-[10px] font-mono backdrop-blur-md"
-              style={{ borderColor: `${meta.color}40`, boxShadow: `0 0 12px -4px ${meta.color}` }}
+              className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#080c16]/80 px-2.5 py-0.5 text-[9px] font-mono backdrop-blur-md"
+              style={{ borderColor: `${meta.color}40`, boxShadow: `0 0 10px -4px ${meta.color}` }}
             >
               <span className="text-xs" style={{ color: meta.color }}>{kf.glyph}</span>
               <span className="text-white/80">{kf.name}</span>
@@ -319,65 +367,124 @@ export default function App() {
         })}
       </div>
 
-      {/* Bottom-Left: Player Vitals (HP, Shield, Dash) */}
-      <div className="pointer-events-none absolute bottom-5 left-5 z-20 flex flex-col gap-1.5 rounded-2xl border border-white/10 bg-[#080c16]/80 p-3.5 backdrop-blur-xl shadow-lg min-w-[220px]">
-        <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-wider">
-          <span className="text-white/40">CASTER VITALS</span>
+      {/* Bottom-Left / Top-Left Vitals (HP & Shield) */}
+      <div className="pointer-events-none absolute bottom-24 sm:bottom-22 left-3 sm:left-5 z-20 flex flex-col gap-1 rounded-xl border border-white/10 bg-[#080c16]/80 p-2.5 backdrop-blur-xl shadow-lg w-[160px] sm:w-[200px]">
+        <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-wider">
+          <span className="text-white/40">VITALS</span>
           <span className="text-cyan-300 font-bold">{Math.round(hud.health)} HP</span>
         </div>
 
         {/* Health Bar */}
-        <div className="relative h-3.5 w-full overflow-hidden rounded-full bg-slate-950 border border-white/10">
+        <div className="relative h-2.5 sm:h-3 w-full overflow-hidden rounded-full bg-slate-950 border border-white/10">
           <div
             className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-150"
             style={{ width: `${healthFrac * 100}%` }}
           />
-          <div className="absolute inset-0 flex items-center justify-center text-[8px] font-mono font-bold text-white/90 drop-shadow">
-            {Math.round(hud.health)} / {hud.maxHealth}
-          </div>
         </div>
 
         {/* Shield Bar */}
-        <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-slate-950 border border-cyan-500/20">
+        <div className="relative h-2 w-full overflow-hidden rounded-full bg-slate-950 border border-cyan-500/20">
           <div
-            className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all duration-150 shadow-[0_0_8px_#38bdf8]"
+            className="h-full bg-gradient-to-r from-cyan-400 to-blue-500 transition-all duration-150"
             style={{ width: `${shieldFrac * 100}%` }}
           />
-          <div className="absolute inset-0 flex items-center justify-center text-[7px] font-mono font-bold text-cyan-100 drop-shadow">
-            SHIELD {Math.round(hud.shield)} / {hud.maxShield}
-          </div>
-        </div>
-
-        {/* Dash Status */}
-        <div className="flex items-center justify-between pt-0.5 font-mono text-[9px]">
-          <div className="flex items-center gap-1.5">
-            <span className="rounded bg-cyan-950 border border-cyan-500/30 px-1 py-0.2 text-cyan-300 font-bold text-[8px]">SPACE</span>
-            <span className="text-white/50">DASH</span>
-          </div>
-          <span className={hud.dashCooldown <= 0.01 ? 'text-cyan-300 font-bold' : 'text-white/30'}>
-            {hud.dashCooldown <= 0.01 ? 'READY' : `${(hud.dashCooldown * 1.1).toFixed(1)}s`}
-          </span>
         </div>
       </div>
 
-      {/* Help / Controls Guide */}
+      {/* 🕹️ VIRTUAL JOYSTICK FOR TOUCH SCREENS (Bottom-Left) */}
+      <div
+        onTouchStart={handleJoystickStart}
+        onTouchMove={handleJoystickMove}
+        onTouchEnd={handleJoystickEnd}
+        onTouchCancel={handleJoystickEnd}
+        className="absolute bottom-22 left-4 z-30 flex items-center justify-center h-28 w-28 rounded-full border border-cyan-500/25 bg-cyan-950/20 backdrop-blur-sm touch-none select-none active:border-cyan-400/50"
+        style={{ touchAction: 'none' }}
+      >
+        <div
+          className={`h-11 w-11 rounded-full border border-cyan-300/60 bg-gradient-to-br from-cyan-400/40 to-blue-600/40 shadow-lg shadow-cyan-500/30 transition-transform duration-75 flex items-center justify-center`}
+          style={{
+            transform: `translate(${joystickKnob.x}px, ${joystickKnob.y}px)`
+          }}
+        >
+          <div className="h-3 w-3 rounded-full bg-cyan-300 shadow-[0_0_6px_#22d3ee]" />
+        </div>
+        <div className="pointer-events-none absolute bottom-1.5 font-mono text-[8px] font-bold text-cyan-300/50 tracking-wider">
+          MOVE
+        </div>
+      </div>
+
+      {/* 📱 MOBILE TOUCH ACTION BUTTONS (Bottom-Right) */}
+      <div className="absolute bottom-22 right-4 z-30 flex flex-col items-end gap-2.5">
+        {/* CAST BUTTON (Visible when ability is armed) */}
+        {hud.armed && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => e()?.doCancel()}
+              className="h-11 w-11 rounded-full border border-white/20 bg-slate-950/80 text-white/70 font-mono text-xs font-bold active:scale-95 shadow-lg backdrop-blur-md"
+            >
+              ✕
+            </button>
+            <button
+              onClick={() => e()?.doConfirm()}
+              className="h-14 w-14 rounded-full border border-cyan-400 bg-gradient-to-br from-cyan-500 to-blue-600 text-white font-mono text-xs font-black active:scale-95 shadow-xl shadow-cyan-500/40 backdrop-blur-md animate-pulse"
+            >
+              CAST
+            </button>
+          </div>
+        )}
+
+        {/* DASH BUTTON */}
+        <button
+          onClick={() => e()?.doDash()}
+          disabled={hud.dashCooldown > 0.01}
+          className={`relative h-13 w-13 rounded-full border font-mono text-[10px] font-bold transition-all active:scale-95 shadow-lg backdrop-blur-md flex flex-col items-center justify-center ${
+            hud.dashCooldown <= 0.01
+              ? 'border-cyan-400/80 bg-cyan-950/60 text-cyan-200 shadow-cyan-500/30'
+              : 'border-white/10 bg-black/40 text-white/30'
+          }`}
+        >
+          <span className="text-base leading-none">💨</span>
+          <span className="text-[8px] mt-0.5">{hud.dashCooldown <= 0.01 ? 'DASH' : `${(hud.dashCooldown * 1.1).toFixed(1)}s`}</span>
+        </button>
+      </div>
+
+      {/* Compact Dismissible Controls & Synergies Modal (Opened ONLY on 'H' tap) */}
       {hud.help && (
-        <div className="pointer-events-none absolute bottom-28 left-5 z-20 max-w-sm rounded-xl border border-white/10 bg-[#080c16]/90 p-4 text-[11px] leading-relaxed text-white/70 backdrop-blur-xl shadow-2xl">
-          <div className="mb-2 font-bold uppercase tracking-widest text-cyan-300 text-xs">Battle Controls & Synergies</div>
-          <Ctrl k="W A S D" v="Move character battle-mage across the arena" />
-          <Ctrl k="SPACE" v="Dash / Dodge lunge with invulnerability frames" />
-          <Ctrl k="Q · 1" v="Frost Lance: Freezes & shatters into tumbling ice shards" />
-          <Ctrl k="E · 2" v="Storm Lance: Electrocutes & chains lightning across mobs" />
-          <Ctrl k="R · 3" v="Cinder Fall: Fiery meteor blast & burning debris" />
-          <Ctrl k="F · 4" v="Nova Beam: Piercing laser that vaporizes monsters" />
-          <Ctrl k="V · 5" v="Voltaic Snare: Gravity vortex that roots & implodes" />
-          <Ctrl k="Mouse / L-Click" v="Aim indicator / Cast ability along arrow or zone" />
-          <Ctrl k="R-Drag / Scroll" v="Orbit camera / Zoom in & out" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md p-4 animate-fade-in">
+          <div className="relative w-full max-w-sm sm:max-w-md rounded-2xl border border-white/15 bg-[#080c16]/95 p-5 text-white/80 shadow-2xl">
+            <button
+              onClick={() => e()?.toggleHelp()}
+              className="absolute top-3.5 right-3.5 h-7 w-7 rounded-full border border-white/15 bg-white/5 text-white/70 hover:text-white flex items-center justify-center font-bold text-xs"
+            >
+              ✕
+            </button>
+            <div className="mb-3 font-bold uppercase tracking-widest text-cyan-300 text-xs flex items-center gap-2">
+              <span>📖</span> Battle Controls & Synergies
+            </div>
+
+            <div className="space-y-1.5 text-[11px] leading-relaxed">
+              <Ctrl k="🕹️ JOYSTICK / WASD" v="Move character battle-mage" />
+              <Ctrl k="💨 DASH / SPACE" v="Rapid dodge lunge with invulnerability" />
+              <Ctrl k="❄ Q · Frost Lance" v="Freezes & shatters into tumbling ice shards" />
+              <Ctrl k="⚡ E · Storm Lance" v="Electrocutes & chains lightning across mobs" />
+              <Ctrl k="☄ R · Cinder Fall" v="Fiery meteor blast & burning debris" />
+              <Ctrl k="✦ F · Nova Beam" v="Piercing laser that vaporizes monsters" />
+              <Ctrl k="⬡ V · Voltaic Snare" v="Gravity vortex that roots & implodes" />
+              <Ctrl k="👆 TOUCH / CLICK" v="Aim indicator & cast ability along target" />
+            </div>
+
+            <button
+              onClick={() => e()?.toggleHelp()}
+              className="mt-4 w-full rounded-xl bg-cyan-500/20 border border-cyan-400/40 py-2 text-center font-mono text-xs font-bold text-cyan-200 hover:bg-cyan-500/30 transition-all"
+            >
+              GOT IT (CLOSE)
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Bottom Toolbar & Ability Hotbar */}
-      <div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2">
+      {/* Bottom Ability Hotbar */}
+      <div className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 sm:gap-2 max-w-[98vw] overflow-x-auto px-2 py-1">
         {SLOTS.map((el, i) => (
           <SlotButton
             key={el}
@@ -387,7 +494,7 @@ export default function App() {
             onClick={() => e()?.armSlot(i)}
           />
         ))}
-        <div className="mx-1 h-10 w-px bg-white/15" />
+        <div className="mx-0.5 sm:mx-1 h-8 sm:h-10 w-px bg-white/15" />
         <ToolButton active={hud.paused} onClick={() => e()?.togglePause()} label="P" title="Pause Game (P)" />
         <ToolButton active={hud.soundMuted} onClick={() => e()?.toggleSound()} label={hud.soundMuted ? '🔇' : '🔊'} title="Toggle Audio" />
         <ToolButton onClick={() => e()?.clearAll()} label="C" title="Clear Visual Effects (C)" />
@@ -397,25 +504,27 @@ export default function App() {
 
       {/* Wave Clear / Power-Up Selection Modal */}
       {hud.gameState === 'wave_clear' && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/75 backdrop-blur-md">
-          <div className="flex flex-col items-center rounded-3xl border border-cyan-500/30 bg-[#080c16]/95 p-8 max-w-xl shadow-2xl text-center">
-            <div className="text-2xl font-bold tracking-[0.25em] text-cyan-300 uppercase">
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/75 backdrop-blur-md p-4">
+          <div className="flex flex-col items-center rounded-3xl border border-cyan-500/30 bg-[#080c16]/95 p-6 sm:p-8 max-w-lg w-full shadow-2xl text-center">
+            <div className="text-xl sm:text-2xl font-bold tracking-[0.25em] text-cyan-300 uppercase">
               ✨ WAVE {hud.currentWave} CLEARED!
             </div>
             <p className="mt-1 text-xs text-white/50">
               Select an elemental perk to empower your spells:
             </p>
 
-            <div className="mt-6 grid grid-cols-3 gap-3.5 w-full">
+            <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3.5 w-full">
               {hud.waveOptions.map((opt) => (
                 <button
                   key={opt.id}
                   onClick={() => e()?.selectPowerup(opt.id)}
-                  className="group flex flex-col items-center rounded-2xl border border-white/10 bg-slate-900/50 p-4 text-center transition-all hover:scale-105 hover:border-cyan-400 hover:bg-cyan-950/20 shadow-md"
+                  className="group flex sm:flex-col items-center gap-3 sm:gap-0 rounded-2xl border border-white/10 bg-slate-900/50 p-3 sm:p-4 text-left sm:text-center transition-all hover:scale-102 sm:hover:scale-105 hover:border-cyan-400 hover:bg-cyan-950/20 shadow-md"
                 >
-                  <div className="text-3xl mb-2 group-hover:scale-110 transition-transform">{opt.icon}</div>
-                  <div className="font-bold text-xs text-cyan-200 group-hover:text-cyan-300">{opt.title}</div>
-                  <div className="mt-1.5 text-[10px] text-white/50 leading-tight">{opt.desc}</div>
+                  <div className="text-2xl sm:text-3xl sm:mb-2 group-hover:scale-110 transition-transform">{opt.icon}</div>
+                  <div>
+                    <div className="font-bold text-xs text-cyan-200 group-hover:text-cyan-300">{opt.title}</div>
+                    <div className="mt-0.5 sm:mt-1 text-[10px] text-white/50 leading-tight">{opt.desc}</div>
+                  </div>
                 </button>
               ))}
             </div>
@@ -425,15 +534,15 @@ export default function App() {
 
       {/* Game Over Defeat Modal */}
       {hud.gameState === 'game_over' && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-md">
-          <div className="flex flex-col items-center rounded-3xl border border-red-500/30 bg-[#080c16]/95 p-8 max-w-md shadow-2xl text-center">
-            <div className="text-3xl font-black tracking-[0.3em] text-red-500 uppercase">
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="flex flex-col items-center rounded-3xl border border-red-500/30 bg-[#080c16]/95 p-6 sm:p-8 max-w-md w-full shadow-2xl text-center">
+            <div className="text-2xl sm:text-3xl font-black tracking-[0.3em] text-red-500 uppercase">
               💀 DEFEAT
             </div>
             <p className="mt-1 text-xs text-white/50">You fell in battle against the void beasts.</p>
 
             {/* Run Summary */}
-            <div className="my-6 w-full rounded-2xl border border-white/10 bg-black/40 p-4 font-mono text-xs">
+            <div className="my-5 w-full rounded-2xl border border-white/10 bg-black/40 p-3.5 font-mono text-xs space-y-1">
               <div className="flex justify-between py-1 border-b border-white/10">
                 <span className="text-white/40">WAVES SURVIVED:</span>
                 <span className="font-bold text-cyan-300">{hud.currentWave - 1}</span>
@@ -454,7 +563,7 @@ export default function App() {
 
             <button
               onClick={() => e()?.restartGame()}
-              className="w-full rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-6 py-3 font-mono text-xs font-bold tracking-widest text-white uppercase shadow-lg shadow-cyan-500/30 transition-all hover:scale-105"
+              className="w-full rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-5 py-2.5 sm:py-3 font-mono text-xs font-bold tracking-widest text-white uppercase shadow-lg shadow-cyan-500/30 transition-all hover:scale-105"
             >
               🔄 PLAY AGAIN
             </button>
@@ -469,7 +578,7 @@ function KillPill({ icon, count, color, title }: { icon: string; count: number; 
   return (
     <div
       title={title}
-      className="flex items-center gap-1 rounded-full border border-white/10 bg-black/40 px-2 py-0.5 font-mono text-[9px]"
+      className="flex items-center gap-1 rounded-full border border-white/10 bg-black/40 px-1.5 sm:px-2 py-0.5 font-mono text-[8px] sm:text-[9px]"
     >
       <span style={{ color }}>{icon}</span>
       <span className="text-white/70">{count}</span>
@@ -479,9 +588,9 @@ function KillPill({ icon, count, color, title }: { icon: string; count: number; 
 
 function Ctrl({ k, v }: { k: string; v: string }) {
   return (
-    <div className="flex items-baseline gap-2 py-0.5">
-      <span className="min-w-[80px] font-mono text-[10px] text-cyan-300/90 font-bold">{k}</span>
-      <span className="text-white/70">{v}</span>
+    <div className="flex items-baseline justify-between gap-2 py-0.5 border-b border-white/5">
+      <span className="font-mono text-[10px] text-cyan-300/90 font-bold whitespace-nowrap">{k}</span>
+      <span className="text-white/70 text-right">{v}</span>
     </div>
   );
 }
@@ -493,21 +602,21 @@ function SlotButton({ element, armed, cooldown, onClick }: { element: string; ar
     <button
       onClick={onClick}
       title={`${meta.label} (${meta.key}) — ${meta.description}`}
-      className={`relative h-15 w-18 overflow-hidden rounded-xl border text-center transition-all ${
+      className={`relative h-12 w-14 sm:h-14 sm:w-16 overflow-hidden rounded-xl border text-center transition-all flex-shrink-0 ${
         armed
           ? 'scale-105 border-white/90 bg-white/15'
           : 'border-white/15 bg-[#080c16]/80 hover:border-white/40 hover:bg-white/10'
       }`}
-      style={{ boxShadow: armed ? `0 0 20px -2px ${meta.color}` : undefined }}
+      style={{ boxShadow: armed ? `0 0 16px -2px ${meta.color}` : undefined }}
     >
-      <div className="mt-1 text-xl leading-none" style={{ color: meta.color, textShadow: `0 0 12px ${meta.color}` }}>
+      <div className="mt-0.5 sm:mt-1 text-lg sm:text-xl leading-none" style={{ color: meta.color, textShadow: `0 0 10px ${meta.color}` }}>
         {meta.glyph}
       </div>
-      <div className="mt-0.5 font-mono text-[10px] uppercase font-bold text-white/70">{meta.key}</div>
-      <div className="text-[8px] text-white/40 truncate px-1">{meta.label.split(' ')[0]}</div>
+      <div className="font-mono text-[9px] sm:text-[10px] uppercase font-bold text-white/70">{meta.key}</div>
+      <div className="text-[7px] sm:text-[8px] text-white/40 truncate px-0.5">{meta.label.split(' ')[0]}</div>
       {onCd && <div className="absolute inset-x-0 bottom-0 bg-black/75" style={{ height: `${cooldown * 100}%` }} />}
       {onCd && (
-        <div className="absolute inset-0 flex items-center justify-center font-mono text-xs font-bold text-white/90">
+        <div className="absolute inset-0 flex items-center justify-center font-mono text-[10px] sm:text-xs font-bold text-white/90">
           {cooldown.toFixed(1)}
         </div>
       )}
@@ -520,7 +629,7 @@ function ToolButton({ active, onClick, label, title }: { active?: boolean; onCli
     <button
       onClick={onClick}
       title={title}
-      className={`h-10 w-10 rounded-xl border font-mono text-xs font-bold transition-all ${
+      className={`h-8 w-8 sm:h-9 sm:w-9 rounded-xl border font-mono text-[10px] sm:text-xs font-bold transition-all flex-shrink-0 ${
         active
           ? 'border-cyan-400 bg-cyan-400/20 text-cyan-200 shadow-md shadow-cyan-500/20'
           : 'border-white/10 bg-[#080c16]/80 text-white/60 hover:border-white/30 hover:text-white/90'

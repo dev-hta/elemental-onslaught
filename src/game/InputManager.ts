@@ -7,7 +7,8 @@ const _right = new Vector3();
 const _move = new Vector3();
 
 /**
- * Normalises pointer + keyboard input into events and continuous movement vectors.
+ * Normalises pointer, touch, virtual joystick, and keyboard inputs
+ * into events and continuous camera-relative movement vectors.
  */
 export class InputManager extends EventEmitter {
   constructor(domElement) {
@@ -16,6 +17,10 @@ export class InputManager extends EventEmitter {
     this.pointer = new Vector2();
     this.keys = new Set();
     this.enabled = true;
+
+    // Virtual Touch Joystick input (-1..1)
+    this.virtualJoystick = new Vector2(0, 0);
+
     this._bind();
   }
 
@@ -25,6 +30,11 @@ export class InputManager extends EventEmitter {
     window.addEventListener('keydown', this._onKeyDown);
     window.addEventListener('keyup', this._onKeyUp);
     this.dom.addEventListener('contextmenu', this._onContextMenu);
+
+    // Touch events for mobile
+    this.dom.addEventListener('touchstart', this._onTouchStart, { passive: false });
+    this.dom.addEventListener('touchmove', this._onTouchMove, { passive: false });
+    this.dom.addEventListener('touchend', this._onTouchEnd, { passive: false });
   }
 
   _onContextMenu = (e) => e.preventDefault();
@@ -49,6 +59,34 @@ export class InputManager extends EventEmitter {
     this._updatePointer(e);
     this.emit('pointer:move', this.pointer);
   };
+
+  _onTouchStart = (e) => {
+    if (!this.enabled || e.touches.length === 0) return;
+    const touch = e.touches[0];
+    // Check if touch target is the main canvas
+    if (e.target === this.dom) {
+      this._updatePointer(touch);
+      this.emit('pointer:move', this.pointer);
+    }
+  };
+
+  _onTouchMove = (e) => {
+    if (!this.enabled || e.touches.length === 0) return;
+    const touch = e.touches[0];
+    if (e.target === this.dom) {
+      this._updatePointer(touch);
+      this.emit('pointer:move', this.pointer);
+    }
+  };
+
+  _onTouchEnd = (_e) => {
+    // handled by touch buttons or canvas taps
+  };
+
+  /** Sets virtual joystick input from mobile touch controller (x: -1..1, y: -1..1) */
+  setVirtualMove(x, y) {
+    this.virtualJoystick.set(x, y);
+  }
 
   _onKeyDown = (e) => {
     const t = e.target;
@@ -110,12 +148,19 @@ export class InputManager extends EventEmitter {
     let inputX = 0;
     let inputZ = 0;
 
+    // 1. Keyboard WASD
     if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) inputZ += 1;
     if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) inputZ -= 1;
     if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) inputX -= 1;
     if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) inputX += 1;
 
-    if (inputX === 0 && inputZ === 0) {
+    // 2. Virtual Joystick overrides or blends
+    if (this.virtualJoystick.lengthSq() > 0.001) {
+      inputX = this.virtualJoystick.x;
+      inputZ = this.virtualJoystick.y;
+    }
+
+    if (Math.abs(inputX) < 0.01 && Math.abs(inputZ) < 0.01) {
       _move.set(0, 0, 0);
       return _move;
     }
@@ -129,9 +174,11 @@ export class InputManager extends EventEmitter {
       _move.set(0, 0, 0);
       _move.addScaledVector(_forward, inputZ);
       _move.addScaledVector(_right, inputX);
-      _move.normalize();
+      const len = _move.length();
+      if (len > 1) _move.normalize();
     } else {
-      _move.set(inputX, 0, -inputZ).normalize();
+      _move.set(inputX, 0, -inputZ);
+      if (_move.length() > 1) _move.normalize();
     }
 
     return _move;
@@ -143,6 +190,9 @@ export class InputManager extends EventEmitter {
     window.removeEventListener('keydown', this._onKeyDown);
     window.removeEventListener('keyup', this._onKeyUp);
     this.dom.removeEventListener('contextmenu', this._onContextMenu);
+    this.dom.removeEventListener('touchstart', this._onTouchStart);
+    this.dom.removeEventListener('touchmove', this._onTouchMove);
+    this.dom.removeEventListener('touchend', this._onTouchEnd);
     this.clear();
   }
 }

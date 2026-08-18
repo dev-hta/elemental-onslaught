@@ -24,7 +24,7 @@ export class Engine {
   constructor(container) {
     this.container = container;
     this.paused = false;
-    this.help = true;
+    this.help = false;
     this.editorOn = false;
     this.soundMuted = false;
     this.clock = new THREE.Clock();
@@ -260,6 +260,15 @@ export class Engine {
   doCancel() {
     this.aim.cancel();
     this._emitState();
+  }
+
+  doDash() {
+    this.character.dash();
+    this._emitState();
+  }
+
+  setVirtualMove(x, y) {
+    this.input.setVirtualMove(x, y);
   }
 
   togglePause() {
